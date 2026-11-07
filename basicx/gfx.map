@@ -1,0 +1,26 @@
+Modules list:
+-------------
+gfx.o:
+    CODE              Offs=000000  Size=000734  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  00E000  00E733  000734  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

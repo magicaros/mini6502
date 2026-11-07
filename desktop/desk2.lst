@@ -1,0 +1,1337 @@
+ca65 V2.19 - Git 52727a5
+Main file   : desk2.asm
+Current file: desk2.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; desk2.asm - mini6502 desktop, bank $15: icons, menus, dialogs, clock,
+000000r 1               ; calculator
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain. Called from bank $14 (desk1.asm) through the jump table.
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1                       .include "desk.inc"
+000000r 2               ;=============================================================================
+000000r 2               ; desk.inc - mini6502 desktop: definitions shared by its two banks
+000000r 2               ;=============================================================================
+000000r 2               
+000000r 2                       .include "../toolkit/tk.inc"
+000000r 3               ;=============================================================================
+000000r 3               ; tk.inc - mini6502 desktop toolkit: shared definitions (both toolkit banks)
+000000r 3               ;-----------------------------------------------------------------------------
+000000r 3               ; Public domain. See README.txt for the programming interface.
+000000r 3               ;=============================================================================
+000000r 3               
+000000r 3               TKBANK1 = $10           ; dispatcher, windows, events
+000000r 3               TKBANK2 = $11           ; menus, dialogs
+000000r 3               SWAPBANK = $D0          ; the caller's RAM ($0000-$CBFF) while the desktop runs
+000000r 3               
+000000r 3               ; --- function numbers (A when calling TOOL = $CC88) --------------------------
+000000r 3               TK_INIT     = 0
+000000r 3               TK_EXIT     = 1
+000000r 3               TK_MENUBAR  = 2
+000000r 3               TK_MENUITEM = 3
+000000r 3               TK_OPENWIN  = 4
+000000r 3               TK_CLOSEWIN = 5
+000000r 3               TK_GETEVENT = 6
+000000r 3               TK_POLLEVENT = 7
+000000r 3               TK_SETPORT  = 8
+000000r 3               TK_ALERT    = 9
+000000r 3               TK_ASK      = 10
+000000r 3               TK_TEXT     = 11
+000000r 3               TK_INVAL    = 12
+000000r 3               TK_FRONT    = 13
+000000r 3               TK_CLEAR    = 14
+000000r 3               TK_SETTITLE = 15
+000000r 3               TK_LAST     = 15
+000000r 3               
+000000r 3               ; --- events (A after GETEVENT / POLLEVENT) ---------------------------------------
+000000r 3               EV_NONE   = 0
+000000r 3               EV_KEY    = 1           ; X = character (0: Y = KBDEXT code)
+000000r 3               EV_MENU   = 2           ; X = menu, Y = item
+000000r 3               EV_CLICK  = 3           ; X = window ($FF desktop), Y = buttons (+$80 double), r0/r1 = x/y
+000000r 3               EV_UPDATE = 4           ; X = window: draw its contents (clip already set)
+000000r 3               EV_CLOSE  = 5           ; X = window: its close box was clicked
+000000r 3               EV_WHEEL  = 6           ; X = front window ($FF none), Y = steps (signed)
+000000r 3               
+000000r 3               ; --- hardware ------------------------------------------------------------------------
+000000r 3               FRAME   = $D001
+000000r 3               KBD     = $D010
+000000r 3               KBDCR   = $D011
+000000r 3               KBDEXT  = $D019
+000000r 3               BANK    = $D020
+000000r 3               DMASRC  = $D210         ; DMA: source, destination, length
+000000r 3               DMACMD  = $D219
+000000r 3               PBADR   = $D208         ; port B (the toolkit's): address, data, step
+000000r 3               PBDATA  = $D20B
+000000r 3               PBSTEP  = $D20C
+000000r 3               MODE    = $D300
+000000r 3               SHOW    = $D301
+000000r 3               DRAW    = $D302
+000000r 3               BX0     = $D310
+000000r 3               BY0     = $D311
+000000r 3               BX1     = $D312
+000000r 3               BY1     = $D313
+000000r 3               BCOL    = $D314
+000000r 3               BDX     = $D315
+000000r 3               BDY     = $D316
+000000r 3               BSRC    = $D317
+000000r 3               BCMD    = $D318
+000000r 3               BX0H    = $D31A
+000000r 3               BY0H    = $D31B
+000000r 3               BX1H    = $D31C
+000000r 3               BY1H    = $D31D
+000000r 3               BDXH    = $D31E
+000000r 3               BDYH    = $D31F
+000000r 3               ROP     = $D328
+000000r 3               PATON   = $D329
+000000r 3               STYLE   = $D32B
+000000r 3               CHOUT   = $D32C
+000000r 3               PATTERN = $D330
+000000r 3               CLIPR   = $D338
+000000r 3               MOUSEX  = $D500
+000000r 3               MOUSEY  = $D502
+000000r 3               BUTTONS = $D504
+000000r 3               WHEEL   = $D505
+000000r 3               CLICKS  = $D506
+000000r 3               PTR     = $D508
+000000r 3               
+000000r 3               C_CLEAR = 1
+000000r 3               C_LINE  = 3
+000000r 3               C_BOX   = 4
+000000r 3               C_BOXF  = 5
+000000r 3               C_COPY  = 6
+000000r 3               C_STAMP = 10
+000000r 3               R_SET   = 0
+000000r 3               R_XOR   = 3
+000000r 3               R_INV   = 4
+000000r 3               S_BOLD  = 1
+000000r 3               S_UNDER = 2
+000000r 3               S_INV   = 8
+000000r 3               S_OPAQUE = 16
+000000r 3               
+000000r 3               ; --- zero page -----------------------------------------------------------------------
+000000r 3               r0      = $02           ; r0-r15: arguments and results, 2 bytes each
+000000r 3               r1      = $04
+000000r 3               r2      = $06
+000000r 3               r3      = $08
+000000r 3               r4      = $0A
+000000r 3               r5      = $0C
+000000r 3               RX0     = $22           ; the rectangle the drawing helpers use
+000000r 3               RY0     = $24
+000000r 3               RX1     = $26
+000000r 3               RY1     = $28
+000000r 3               DX0     = $2A           ; damage rectangle (redraw pass)
+000000r 3               DY0     = $2C
+000000r 3               DX1     = $2E
+000000r 3               DY1     = $30
+000000r 3               TP      = $32           ; text pointer
+000000r 3               QP      = $34           ; second pointer
+000000r 3               T0      = $36           ; temporaries
+000000r 3               T1      = $38
+000000r 3               T2      = $3A
+000000r 3               T3      = $3C
+000000r 3               WP      = $3E           ; pointer to a window record
+000000r 3               CBANK   = $40           ; the caller's bank (set by the dispatcher)
+000000r 3               EVX     = $41           ; event being returned: X, Y
+000000r 3               EVY     = $42
+000000r 3               TMPB    = $43
+000000r 3               TMPC    = $44
+000000r 3               MX      = $46           ; mouse position, 2 bytes each
+000000r 3               MY      = $48
+000000r 3               NUMW    = $4A           ; number of windows open
+000000r 3               FRONTW  = $4B           ; window in front ($FF none)
+000000r 3               PASSON  = $4C           ; nonzero: a redraw pass is going on
+000000r 3               PEND    = $4D           ; windows still to redraw (bit per window)
+000000r 3               UPDW    = $4E           ; window of the UPDATE being drawn ($FF none)
+000000r 3               NMENU   = $4F           ; menus in the bar
+000000r 3               DAMAGE  = $50           ; nonzero: DX0..DY1 must be redrawn
+000000r 3               
+000000r 3               ; --- fixed RAM ----------------------------------------------------------------------
+000000r 3               WINREC  = $0200         ; 8 window records of 32 bytes
+000000r 3               W_USED  = 0             ;  1 if open
+000000r 3               W_X0    = 1             ;  outer rectangle (the shadow is 2 more right/down)
+000000r 3               W_Y0    = 3
+000000r 3               W_X1    = 5
+000000r 3               W_Y1    = 7
+000000r 3               W_TITLE = 9             ;  title, up to 22 characters + 0
+000000r 3               ZORDER  = $0300         ; window numbers, back to front (NUMW of them)
+000000r 3               MTL     = $0308         ; menu: title address, low / high (8 + 8)
+000000r 3               MTH     = $0310
+000000r 3               MFIRST  = $0318         ; menu: first item number (8)
+000000r 3               MCOUNT  = $0320         ; menu: number of items (8)
+000000r 3               MXL     = $0328         ; menu: title x position, low / high (8 + 8)
+000000r 3               MXH     = $0330
+000000r 3               MWIDTH  = $0338         ; menu: width of its box in characters (8)
+000000r 3               IPL     = $0340         ; item: text address, low / high (64 + 64)
+000000r 3               IPH     = $0380
+000000r 3               IFLAG   = $03C0         ; item: 1 enabled, 2 separator (64)
+000000r 3               IKEY    = $0400         ; item: Ctrl+key shortcut letter, 0 none (64)
+000000r 3               MTEXT   = $0480         ; menu texts
+000000r 3               MTEXTEND = $07FE
+000000r 3               MAGIC   = $07FE         ; "TK" while a toolkit program runs
+000000r 3               STRBUF  = $C000         ; strings copied from the caller (dialogs)
+000000r 3               STRBUF2 = $C100
+000000r 3               ASKBUF  = $C200
+000000r 3               
+000000r 3               MAXWIN  = 8
+000000r 3               MAXMENU = 8
+000000r 3               MAXITEM = 64
+000000r 3               TITLEH  = 19            ; window title bar: rows y0..y0+18, line at y0+19
+000000r 3               MENUH   = 19            ; menu bar: rows 0..18, line at 19
+000000r 3               
+000000r 3               ; --- helpers ---------------------------------------------------------------------------
+000000r 3               .macro  LDW dst, val            ; dst = 16-bit constant
+000000r 3                       lda #<(val)
+000000r 3                       sta dst
+000000r 3                       lda #>(val)
+000000r 3                       sta dst+1
+000000r 3               .endmacro
+000000r 3               .macro  MOVW dst, src           ; dst = src (16-bit)
+000000r 3                       lda src
+000000r 3                       sta dst
+000000r 3                       lda src+1
+000000r 3                       sta dst+1
+000000r 3               .endmacro
+000000r 3               .macro  ADDW dst, src, val      ; dst = src + constant
+000000r 3                       lda src
+000000r 3                       clc
+000000r 3                       adc #<(val)
+000000r 3                       sta dst
+000000r 3                       lda src+1
+000000r 3                       adc #>(val)
+000000r 3                       sta dst+1
+000000r 3               .endmacro
+000000r 3               .macro  SUBW dst, src, val      ; dst = src - constant
+000000r 3                       lda src
+000000r 3                       sec
+000000r 3                       sbc #<(val)
+000000r 3                       sta dst
+000000r 3                       lda src+1
+000000r 3                       sbc #>(val)
+000000r 3                       sta dst+1
+000000r 3               .endmacro
+000000r 3               .macro  FAR bank, addr          ; call into another bank: returns to whoever
+000000r 3                                               ; called the routine this is in (use it as
+000000r 3                                               ; the whole body of a routine called by JSR)
+000000r 3                       jsr $FFD0
+000000r 3                       .byte bank
+000000r 3                       .word addr
+000000r 3               .endmacro
+000000r 3               
+000000r 2               
+000000r 2               DESKBANK1 = $14         ; desk1.asm: main loop, the disk window, launching
+000000r 2               DESKBANK2 = $15         ; desk2.asm: menus, dialogs, clock, calculator
+000000r 2               DESKBANK3 = $16         ; desk3.asm: the icons
+000000r 2               LAUNCHBANK = $20        ; programs from the disk are loaded here
+000000r 2               SAVEBANK  = $C0         ; the desktop's RAM while a program runs ($C0-$CC)
+000000r 2               
+000000r 2               TOOL    = $CC88         ; far-call entry 16: the toolkit
+000000r 2               DESKENT = $CC90         ; far-call entry 17: the desktop (CALL $CC90)
+000000r 2               ; far-call entries 18-24 ($CC98-$CCCF) are the desktop's own stubs:
+000000r 2               RESUME  = $CC98         ; JSR $FFD0 / DESKBANK1 / resume   (the G command)
+000000r 2               LAUNCH  = $CCA0         ; JSR TARGET / LDA #DESKBANK1 / STA BANK / JMP RESUME
+000000r 2               TARGET  = $CCB0         ; JMP entry, or JSR $FFD0 / bank / entry
+000000r 2               BANKLD  = $CCB8         ; LDA #bank / STA BANK / LDA #3 / STA DCMD /
+000000r 2                                       ; LDA #DESKBANK1 / STA BANK / RTS
+000000r 2               
+000000r 2               SYSCTL  = $D000
+000000r 2               WARMLO  = $D002
+000000r 2               WARMHI  = $D003
+000000r 2               CLOCKH  = $D004
+000000r 2               CLOCKM  = $D005
+000000r 2               CLOCKS  = $D006
+000000r 2               DCMD    = $D040
+000000r 2               DSTAT   = $D041
+000000r 2               DSTART  = $D042
+000000r 2               DEND    = $D044
+000000r 2               DNAME   = $D046
+000000r 2               DNLEN   = $D048
+000000r 2               PADR    = $D200         ; port A (ours)
+000000r 2               PDATA   = $D203
+000000r 2               PSTEP   = $D204
+000000r 2               
+000000r 2               ; file kinds (and icons)
+000000r 2               K_DATA  = 0
+000000r 2               K_TEXT  = 1
+000000r 2               K_BASIC = 2
+000000r 2               K_PROG  = 3             ; machine code in the main RAM: entry = load address
+000000r 2               K_APP   = 4             ; machine code for a bank ($E000)
+000000r 2               K_SYS   = 5             ; the toolkit and the desktop themselves, VECTORS
+000000r 2               
+000000r 2               ; fixed RAM (the desktop's while it runs; saved while a program runs)
+000000r 2               DIRBUF  = $0800         ; DIR into memory ($0800-$0FFF)
+000000r 2               DIREND  = $1000
+000000r 2               FNL     = $1000         ; name address, low / high (64 + 64)
+000000r 2               FNH     = $1040
+000000r 2               FKIND   = $1080
+000000r 2               FSZL    = $10C0         ; size
+000000r 2               FSZH    = $1100
+000000r 2               FLDL    = $1140         ; load address
+000000r 2               FLDH    = $1180
+000000r 2               NFILES  = $11C0
+000000r 2               SCRATCH = $C300         ; strings built for dialogs and scripts
+000000r 2               NAMEBUF = $C400         ; RENAME's answer
+000000r 2               MAXFILE = 64
+000000r 2               
+000000r 2               ; zero page ($80-$FF is the program's)
+000000r 2               DP      = $80           ; pointer
+000000r 2               DQ      = $82
+000000r 2               D0      = $84           ; temporaries
+000000r 2               D1      = $86
+000000r 2               D2      = $88
+000000r 2               D3      = $8A
+000000r 2               ORGX    = $8C           ; contents of the window being drawn
+000000r 2               ORGY    = $8E
+000000r 2               CX      = $90
+000000r 2               CY      = $92
+000000r 2               IDX     = $94
+000000r 2               NUM     = $96           ; 4 bytes
+000000r 2               
+000000r 2               .macro  TK fn
+000000r 2                       lda #fn
+000000r 2                       jsr TOOL
+000000r 2               .endmacro
+000000r 2               
+000000r 1               
+000000r 1               A32     = $A0                   ; calculator arithmetic, 4 bytes each
+000000r 1               B32     = $A4
+000000r 1               R32     = $A8
+000000r 1               SIGN    = $AC
+000000r 1               CNT     = $AD
+000000r 1               
+000000r 1                       .org $E000
+00E000  1               
+00E000  1  60                   rts                     ; $E000 (the icons are in bank $16 now)
+00E001  1  EA                   nop
+00E002  1  EA                   nop
+00E003  1  4C 24 E0             jmp menus               ; $E003
+00E006  1  4C 73 E1             jmp info                ; $E006 A = file
+00E009  1  4C 86 E2             jmp rename              ; $E009 A = file; carry clear if renamed
+00E00C  1  4C 59 E3             jmp delete              ; $E00C A = file; carry clear if deleted
+00E00F  1  4C 5E E5             jmp clock               ; $E00F X = its window (UPDATE)
+00E012  1  4C F3 E5             jmp calc                ; $E012 X = its window (UPDATE)
+00E015  1  4C D2 E7             jmp cclick              ; $E015 X = its window, r0/r1 = the click
+00E018  1  4C 69 E8             jmp ckey                ; $E018 A = key, X = its window
+00E01B  1  4C D9 E3             jmp script              ; $E01B A = 0: LOAD/RUN file X, 1: SYSTEM
+00E01E  1  4C 57 E4             jmp about               ; $E01E
+00E021  1  4C 16 E5             jmp msg                 ; $E021 A = message
+00E024  1               
+00E024  1               ; --- the menu bar -----------------------------------------------------------------------
+00E024  1  A9 32 85 02  menus:  LDW r0, menudef
+00E028  1  A9 E0 85 03  
+00E02C  1  A9 02 20 88          TK TK_MENUBAR
+00E030  1  CC           
+00E031  1  60                   rts
+00E032  1               menudef:
+00E032  1  6D 69 6E 69          .byte "mini6502", 0, "About the desktop...", 0, "-", 0
+00E036  1  36 35 30 32  
+00E03A  1  00 41 62 6F  
+00E052  1  43 6C 6F 63          .byte "Clock", 0, "Calculator", 0, 0
+00E056  1  6B 00 43 61  
+00E05A  1  6C 63 75 6C  
+00E064  1  46 69 6C 65          .byte "File", 0, "Open/O", 0, "Get info/G", 0, "Rename...", 0
+00E068  1  00 4F 70 65  
+00E06C  1  6E 2F 4F 00  
+00E085  1  44 65 6C 65          .byte "Delete.../D", 0, "-", 0, "Back to BASIC/Q", 0, 0
+00E089  1  74 65 2E 2E  
+00E08D  1  2E 2F 44 00  
+00E0A4  1  56 69 65 77          .byte "View", 0, "by Icon", 0, "by Name", 0, "-", 0, "Refresh/R", 0, 0
+00E0A8  1  00 62 79 20  
+00E0AC  1  49 63 6F 6E  
+00E0C6  1  53 70 65 63          .byte "Special", 0, "Monitor", 0, "Shutdown", 0, 0
+00E0CA  1  69 61 6C 00  
+00E0CE  1  4D 6F 6E 69  
+00E0E0  1  00                   .byte 0
+00E0E1  1               
+00E0E1  1               ; --- building strings in SCRATCH -----------------------------------------------------
+00E0E1  1  A9 00        sbegin: lda #0
+00E0E3  1  8D C9 EA             sta SLEN
+00E0E6  1  60                   rts
+00E0E7  1  AE C9 EA     sput:   ldx SLEN
+00E0EA  1  9D 00 C3             sta SCRATCH,x
+00E0ED  1  EE C9 EA             inc SLEN
+00E0F0  1  A9 00                lda #0
+00E0F2  1  9D 01 C3             sta SCRATCH+1,x
+00E0F5  1  60                   rts
+00E0F6  1               ; the string at XA (this bank or fixed RAM)
+00E0F6  1  85 82        sstr:   sta DQ
+00E0F8  1  86 83                stx DQ+1
+00E0FA  1  A0 00                ldy #0
+00E0FC  1  B1 82        @l:     lda (DQ),y
+00E0FE  1  F0 0A                beq @e
+00E100  1  84 AD                sty CNT
+00E102  1  20 E7 E0             jsr sput
+00E105  1  A4 AD                ldy CNT
+00E107  1  C8                   iny
+00E108  1  D0 F2                bne @l
+00E10A  1  60           @e:     rts
+00E10B  1               ; file A's name
+00E10B  1  AA           sname:  tax
+00E10C  1  BD 00 10             lda FNL,x
+00E10F  1  48                   pha
+00E110  1  BD 40 10             lda FNH,x
+00E113  1  AA                   tax
+00E114  1  68                   pla
+00E115  1  4C F6 E0             jmp sstr
+00E118  1               ; NUM as decimal (no leading zeros)
+00E118  1  A0 00        sdec:   ldy #0
+00E11A  1  84 88                sty D2
+00E11C  1  A2 00        @d:     ldx #0
+00E11E  1  A5 96        @s:     lda NUM
+00E120  1  38                   sec
+00E121  1  F9 53 E1             sbc p10l,y
+00E124  1  85 86                sta D1
+00E126  1  A5 97                lda NUM+1
+00E128  1  F9 58 E1             sbc p10h,y
+00E12B  1  90 09                bcc @o
+00E12D  1  85 97                sta NUM+1
+00E12F  1  A5 86                lda D1
+00E131  1  85 96                sta NUM
+00E133  1  E8                   inx
+00E134  1  D0 E8                bne @s
+00E136  1  8A           @o:     txa
+00E137  1  D0 08                bne @dig
+00E139  1  C0 04                cpy #4
+00E13B  1  F0 04                beq @dig
+00E13D  1  A5 88                lda D2
+00E13F  1  F0 0C                beq @nx
+00E141  1  E6 88        @dig:   inc D2
+00E143  1  8A                   txa
+00E144  1  09 30                ora #'0'
+00E146  1  84 AD                sty CNT
+00E148  1  20 E7 E0             jsr sput
+00E14B  1  A4 AD                ldy CNT
+00E14D  1  C8           @nx:    iny
+00E14E  1  C0 05                cpy #5
+00E150  1  D0 CA                bne @d
+00E152  1  60                   rts
+00E153  1  10 E8 64 0A  p10l:   .byte <10000, <1000, <100, <10, <1
+00E157  1  01           
+00E158  1  27 03 00 00  p10h:   .byte >10000, >1000, >100, >10, >1
+00E15C  1  00           
+00E15D  1               ; A as 2 hex digits
+00E15D  1  48           shex:   pha
+00E15E  1  4A                   lsr
+00E15F  1  4A                   lsr
+00E160  1  4A                   lsr
+00E161  1  4A                   lsr
+00E162  1  20 68 E1             jsr @n
+00E165  1  68                   pla
+00E166  1  29 0F                and #$0F
+00E168  1  C9 0A        @n:     cmp #10
+00E16A  1  90 02                bcc @d
+00E16C  1  69 06                adc #6
+00E16E  1  69 30        @d:     adc #'0'
+00E170  1  4C E7 E0             jmp sput
+00E173  1               
+00E173  1               ; --- Get info ------------------------------------------------------------------------------
+00E173  1  85 94        info:   sta IDX
+00E175  1  20 E1 E0             jsr sbegin
+00E178  1  A5 94                lda IDX
+00E17A  1  20 0B E1             jsr sname
+00E17D  1  A9 0D                lda #13
+00E17F  1  20 E7 E0             jsr sput
+00E182  1  A9 61                lda #<s_kind
+00E184  1  A2 E2                ldx #>s_kind
+00E186  1  20 F6 E0             jsr sstr
+00E189  1  A6 94                ldx IDX
+00E18B  1  BD 80 10             lda FKIND,x
+00E18E  1  0A                   asl
+00E18F  1  AA                   tax
+00E190  1  BC EF E1             ldy kinds,x
+00E193  1  BD F0 E1             lda kinds+1,x
+00E196  1  AA                   tax
+00E197  1  98                   tya
+00E198  1  20 F6 E0             jsr sstr
+00E19B  1  A9 0D                lda #13
+00E19D  1  20 E7 E0             jsr sput
+00E1A0  1  A9 68                lda #<s_size
+00E1A2  1  A2 E2                ldx #>s_size
+00E1A4  1  20 F6 E0             jsr sstr
+00E1A7  1  A6 94                ldx IDX
+00E1A9  1  BD C0 10             lda FSZL,x
+00E1AC  1  85 96                sta NUM
+00E1AE  1  BD 00 11             lda FSZH,x
+00E1B1  1  85 97                sta NUM+1
+00E1B3  1  20 18 E1             jsr sdec
+00E1B6  1  A9 6F                lda #<s_bytes
+00E1B8  1  A2 E2                ldx #>s_bytes
+00E1BA  1  20 F6 E0             jsr sstr
+00E1BD  1  A9 0D                lda #13
+00E1BF  1  20 E7 E0             jsr sput
+00E1C2  1  A9 76                lda #<s_load
+00E1C4  1  A2 E2                ldx #>s_load
+00E1C6  1  20 F6 E0             jsr sstr
+00E1C9  1  A6 94                ldx IDX
+00E1CB  1  BD 80 11             lda FLDH,x
+00E1CE  1  20 5D E1             jsr shex
+00E1D1  1  A6 94                ldx IDX
+00E1D3  1  BD 40 11             lda FLDL,x
+00E1D6  1  20 5D E1             jsr shex
+00E1D9  1  A9 00 85 02          LDW r0, SCRATCH
+00E1DD  1  A9 C3 85 03  
+00E1E1  1  A9 00 85 04          LDW r1, 0
+00E1E5  1  A9 00 85 05  
+00E1E9  1  A9 09 20 88          TK TK_ALERT
+00E1ED  1  CC           
+00E1EE  1  60                   rts
+00E1EF  1  FB E1 00 E2  kinds:  .word k0, k1, k2, k3, k4, k5
+00E1F3  1  15 E2 23 E2  
+00E1F7  1  3B E2 4E E2  
+00E1FB  1  64 61 74 61  k0:     .byte "data", 0
+00E1FF  1  00           
+00E200  1  74 65 78 74  k1:     .byte "text (opens in EDIT)", 0
+00E204  1  20 28 6F 70  
+00E208  1  65 6E 73 20  
+00E215  1  42 41 53 49  k2:     .byte "BASIC program", 0
+00E219  1  43 20 70 72  
+00E21D  1  6F 67 72 61  
+00E223  1  70 72 6F 67  k3:     .byte "program in the main RAM", 0
+00E227  1  72 61 6D 20  
+00E22B  1  69 6E 20 74  
+00E23B  1  70 72 6F 67  k4:     .byte "program for a bank", 0
+00E23F  1  72 61 6D 20  
+00E243  1  66 6F 72 20  
+00E24E  1  70 61 72 74  k5:     .byte "part of the system", 0
+00E252  1  20 6F 66 20  
+00E256  1  74 68 65 20  
+00E261  1  4B 69 6E 64  s_kind: .byte "Kind: ", 0
+00E265  1  3A 20 00     
+00E268  1  53 69 7A 65  s_size: .byte "Size: ", 0
+00E26C  1  3A 20 00     
+00E26F  1  20 62 79 74  s_bytes: .byte " bytes", 0
+00E273  1  65 73 00     
+00E276  1  4C 6F 61 64  s_load: .byte "Load address: $", 0
+00E27A  1  20 61 64 64  
+00E27E  1  72 65 73 73  
+00E286  1               
+00E286  1               ; --- Rename ---------------------------------------------------------------------------------
+00E286  1  85 94        rename: sta IDX
+00E288  1  AA                   tax                     ; the old name as the answer to edit
+00E289  1  BD 00 10             lda FNL,x
+00E28C  1  85 80                sta DP
+00E28E  1  BD 40 10             lda FNH,x
+00E291  1  85 81                sta DP+1
+00E293  1  A0 00                ldy #0
+00E295  1  B1 80        @c:     lda (DP),y
+00E297  1  99 00 C4             sta NAMEBUF,y
+00E29A  1  F0 0A                beq @a
+00E29C  1  C8                   iny
+00E29D  1  C0 28                cpy #40
+00E29F  1  D0 F4                bne @c
+00E2A1  1  A9 00                lda #0
+00E2A3  1  99 00 C4             sta NAMEBUF,y
+00E2A6  1  A9 05 85 02  @a:     LDW r0, s_newname
+00E2AA  1  A9 E3 85 03  
+00E2AE  1  A9 00 85 04          LDW r1, NAMEBUF
+00E2B2  1  A9 C4 85 05  
+00E2B6  1  A9 28 85 06          LDW r2, 40
+00E2BA  1  A9 00 85 07  
+00E2BE  1  A9 0A 20 88          TK TK_ASK
+00E2C2  1  CC           
+00E2C3  1  B0 3F                bcs @r
+00E2C5  1  A6 94                ldx IDX
+00E2C7  1  BD 00 10             lda FNL,x
+00E2CA  1  8D 46 D0             sta DNAME
+00E2CD  1  BD 40 10             lda FNH,x
+00E2D0  1  8D 47 D0             sta DNAME+1
+00E2D3  1  A9 00                lda #0
+00E2D5  1  8D 48 D0             sta DNLEN
+00E2D8  1  A9 00 8D 42          LDW DSTART, NAMEBUF
+00E2DC  1  D0 A9 C4 8D  
+00E2E0  1  43 D0        
+00E2E2  1  A9 08                lda #8                  ; RENAME
+00E2E4  1  8D 40 D0             sta DCMD
+00E2E7  1  AD 41 D0             lda DSTAT
+00E2EA  1  F0 17                beq @ok
+00E2EC  1  A9 0F 85 02          LDW r0, s_norename
+00E2F0  1  A9 E3 85 03  
+00E2F4  1  A9 00 85 04          LDW r1, 0
+00E2F8  1  A9 00 85 05  
+00E2FC  1  A9 09 20 88          TK TK_ALERT
+00E300  1  CC           
+00E301  1  38                   sec
+00E302  1  60                   rts
+00E303  1  18           @ok:    clc
+00E304  1  60           @r:     rts
+00E305  1  4E 65 77 20  s_newname: .byte "New name:", 0
+00E309  1  6E 61 6D 65  
+00E30D  1  3A 00        
+00E30F  1  43 6F 75 6C  s_norename: .byte "Could not rename it: that name is taken", 13
+00E313  1  64 20 6E 6F  
+00E317  1  74 20 72 65  
+00E337  1  6F 72 20 6E              .byte "or not valid (A-Z a-z 0-9 . _ -).", 0
+00E33B  1  6F 74 20 76  
+00E33F  1  61 6C 69 64  
+00E359  1               
+00E359  1               ; --- Delete ----------------------------------------------------------------------------------
+00E359  1  85 94        delete: sta IDX
+00E35B  1  20 E1 E0             jsr sbegin
+00E35E  1  A9 A6                lda #<s_del1
+00E360  1  A2 E3                ldx #>s_del1
+00E362  1  20 F6 E0             jsr sstr
+00E365  1  A5 94                lda IDX
+00E367  1  20 0B E1             jsr sname
+00E36A  1  A9 AE                lda #<s_del2
+00E36C  1  A2 E3                ldx #>s_del2
+00E36E  1  20 F6 E0             jsr sstr
+00E371  1  A9 00 85 02          LDW r0, SCRATCH
+00E375  1  A9 C3 85 03  
+00E379  1  A9 CB 85 04          LDW r1, s_delbtn
+00E37D  1  A9 E3 85 05  
+00E381  1  A9 09 20 88          TK TK_ALERT
+00E385  1  CC           
+00E386  1  C9 00                cmp #0
+00E388  1  D0 1A                bne @no
+00E38A  1  A6 94                ldx IDX
+00E38C  1  BD 00 10             lda FNL,x
+00E38F  1  8D 46 D0             sta DNAME
+00E392  1  BD 40 10             lda FNH,x
+00E395  1  8D 47 D0             sta DNAME+1
+00E398  1  A9 00                lda #0
+00E39A  1  8D 48 D0             sta DNLEN
+00E39D  1  A9 05                lda #5                  ; DELETE
+00E39F  1  8D 40 D0             sta DCMD
+00E3A2  1  18                   clc
+00E3A3  1  60                   rts
+00E3A4  1  38           @no:    sec
+00E3A5  1  60                   rts
+00E3A6  1  44 65 6C 65  s_del1: .byte "Delete ", 0
+00E3AA  1  74 65 20 00  
+00E3AE  1  3F 0D 49 74  s_del2: .byte "?", 13, "It cannot be brought back.", 0
+00E3B2  1  20 63 61 6E  
+00E3B6  1  6E 6F 74 20  
+00E3CB  1  44 65 6C 65  s_delbtn: .byte "Delete|Cancel", 0
+00E3CF  1  74 65 7C 43  
+00E3D3  1  61 6E 63 65  
+00E3D9  1               
+00E3D9  1               ; --- scripts typed into BASIC after the desktop quits ----------------------------------
+00E3D9  1  48           script: pha
+00E3DA  1  86 94                stx IDX
+00E3DC  1  20 E1 E0             jsr sbegin
+00E3DF  1  68                   pla
+00E3E0  1  D0 16                bne @sys
+00E3E2  1  A9 38                lda #<s_loadq
+00E3E4  1  A2 E4                ldx #>s_loadq
+00E3E6  1  20 F6 E0             jsr sstr
+00E3E9  1  A5 94                lda IDX
+00E3EB  1  20 0B E1             jsr sname
+00E3EE  1  A9 3F                lda #<s_run
+00E3F0  1  A2 E4                ldx #>s_run
+00E3F2  1  20 F6 E0             jsr sstr
+00E3F5  1  4C FF E3             jmp @save
+00E3F8  1  A9 46        @sys:   lda #<s_system
+00E3FA  1  A2 E4                ldx #>s_system
+00E3FC  1  20 F6 E0             jsr sstr
+00E3FF  1  A9 00 8D 42  @save:  LDW DSTART, SCRATCH     ; SAVE it, TYPE it, DELETE it
+00E403  1  D0 A9 C3 8D  
+00E407  1  43 D0        
+00E409  1  A9 00                lda #<SCRATCH
+00E40B  1  18                   clc
+00E40C  1  6D C9 EA             adc SLEN
+00E40F  1  8D 44 D0             sta DEND
+00E412  1  A9 C3                lda #>SCRATCH
+00E414  1  69 00                adc #0
+00E416  1  8D 45 D0             sta DEND+1
+00E419  1  A9 4E 8D 46          LDW DNAME, s_runfile
+00E41D  1  D0 A9 E4 8D  
+00E421  1  47 D0        
+00E423  1  A9 00                lda #0
+00E425  1  8D 48 D0             sta DNLEN
+00E428  1  A9 02                lda #2
+00E42A  1  8D 40 D0             sta DCMD
+00E42D  1  A9 06                lda #6
+00E42F  1  8D 40 D0             sta DCMD
+00E432  1  A9 05                lda #5
+00E434  1  8D 40 D0             sta DCMD
+00E437  1  60                   rts
+00E438  1  4C 4F 41 44  s_loadq: .byte "LOAD ", 34, 0
+00E43C  1  20 22 00     
+00E43F  1  22 0D 52 55  s_run:   .byte 34, 13, "RUN", 13, 0
+00E443  1  4E 0D 00     
+00E446  1  53 59 53 54  s_system: .byte "SYSTEM", 13, 0
+00E44A  1  45 4D 0D 00  
+00E44E  1  44 45 53 4B  s_runfile: .byte "DESK.RUN", 0
+00E452  1  2E 52 55 4E  
+00E456  1  00           
+00E457  1               
+00E457  1               ; --- About and messages ---------------------------------------------------------------
+00E457  1  A9 6D 85 02  about:  LDW r0, s_about
+00E45B  1  A9 E4 85 03  
+00E45F  1  A9 00 85 04          LDW r1, 0
+00E463  1  A9 00 85 05  
+00E467  1  A9 09 20 88          TK TK_ALERT
+00E46B  1  CC           
+00E46C  1  60                   rts
+00E46D  1  6D 69 6E 69  s_about: .byte "mini6502 desktop", 13, 13
+00E471  1  36 35 30 32  
+00E475  1  20 64 65 73  
+00E47F  1  44 6F 75 62           .byte "Double-click a file to open it: programs run,", 13
+00E483  1  6C 65 2D 63  
+00E487  1  6C 69 63 6B  
+00E4AD  1  74 65 78 74           .byte "text opens in EDIT, BASIC programs in BASIC.", 13
+00E4B1  1  20 6F 70 65  
+00E4B5  1  6E 73 20 69  
+00E4DA  1  41 66 74 65           .byte "After a program, F1 then G comes back here.", 13, 13
+00E4DE  1  72 20 61 20  
+00E4E2  1  70 72 6F 67  
+00E507  1  50 75 62 6C           .byte "Public domain.", 0
+00E50B  1  69 63 20 64  
+00E50F  1  6F 6D 61 69  
+00E516  1               
+00E516  1  A9 2C 85 02  msg:    LDW r0, s_noedit
+00E51A  1  A9 E5 85 03  
+00E51E  1  A9 00 85 04          LDW r1, 0
+00E522  1  A9 00 85 05  
+00E526  1  A9 09 20 88          TK TK_ALERT
+00E52A  1  CC           
+00E52B  1  60                   rts
+00E52C  1  45 44 49 54  s_noedit: .byte "EDIT is not on the disk: text files", 13
+00E530  1  20 69 73 20  
+00E534  1  6E 6F 74 20  
+00E550  1  6F 70 65 6E            .byte "open with it.", 0
+00E554  1  20 77 69 74  
+00E558  1  68 20 69 74  
+00E55E  1               
+00E55E  1               ; --- clock ------------------------------------------------------------------------------------
+00E55E  1  A9 08 20 88  clock:  TK TK_SETPORT           ; r0-r3 = its contents
+00E562  1  CC           
+00E563  1  20 E1 E0             jsr sbegin
+00E566  1  AD 04 D0             lda CLOCKH
+00E569  1  20 DD E5             jsr s2dig
+00E56C  1  A9 3A                lda #':'
+00E56E  1  20 E7 E0             jsr sput
+00E571  1  AD 05 D0             lda CLOCKM
+00E574  1  20 DD E5             jsr s2dig
+00E577  1  A9 3A                lda #':'
+00E579  1  20 E7 E0             jsr sput
+00E57C  1  AD 06 D0             lda CLOCKS
+00E57F  1  20 DD E5             jsr s2dig
+00E582  1  A5 02                lda r0                  ; centred: (x0 + x1) / 2 - 32
+00E584  1  18                   clc
+00E585  1  65 06                adc r2
+00E587  1  85 84                sta D0
+00E589  1  A5 03                lda r0+1
+00E58B  1  65 07                adc r2+1
+00E58D  1  4A                   lsr
+00E58E  1  66 84                ror D0
+00E590  1  85 85                sta D0+1
+00E592  1  A5 84 38 E9          SUBW D0, D0, 32
+00E596  1  20 85 84 A5  
+00E59A  1  85 E9 00 85  
+00E59F  1  A5 84                lda D0
+00E5A1  1  8D 10 D3             sta BX0
+00E5A4  1  A5 85                lda D0+1
+00E5A6  1  8D 1A D3             sta BX0H
+00E5A9  1  A5 04 18 69          ADDW D1, r1, 4
+00E5AD  1  04 85 86 A5  
+00E5B1  1  05 69 00 85  
+00E5B6  1  A5 86                lda D1
+00E5B8  1  8D 11 D3             sta BY0
+00E5BB  1  A5 87                lda D1+1
+00E5BD  1  8D 1B D3             sta BY0H
+00E5C0  1  A9 00                lda #0
+00E5C2  1  8D 28 D3             sta ROP
+00E5C5  1  A9 11                lda #S_BOLD + S_OPAQUE
+00E5C7  1  8D 2B D3             sta STYLE
+00E5CA  1  A2 00                ldx #0
+00E5CC  1  BD 00 C3     @c:     lda SCRATCH,x
+00E5CF  1  F0 06                beq @e
+00E5D1  1  8D 2C D3             sta CHOUT
+00E5D4  1  E8                   inx
+00E5D5  1  D0 F5                bne @c
+00E5D7  1  A9 00        @e:     lda #0
+00E5D9  1  8D 2B D3             sta STYLE
+00E5DC  1  60                   rts
+00E5DD  1  A2 30        s2dig:  ldx #'0'
+00E5DF  1  C9 0A        @t:     cmp #10
+00E5E1  1  90 05                bcc @o
+00E5E3  1  E9 0A                sbc #10
+00E5E5  1  E8                   inx
+00E5E6  1  D0 F7                bne @t
+00E5E8  1  48           @o:     pha
+00E5E9  1  8A                   txa
+00E5EA  1  20 E7 E0             jsr sput
+00E5ED  1  68                   pla
+00E5EE  1  09 30                ora #'0'
+00E5F0  1  4C E7 E0             jmp sput
+00E5F3  1               
+00E5F3  1               ; --- calculator ------------------------------------------------------------------------------
+00E5F3  1               ; 32-bit whole numbers: + - * /, = (or Enter), C clears, Backspace erases a
+00E5F3  1               ; digit. Keys or clicks on its buttons.
+00E5F3  1               
+00E5F3  1  A9 08 20 88  calc:   TK TK_SETPORT           ; everything: display and buttons
+00E5F7  1  CC           
+00E5F8  1  20 D3 E6             jsr display
+00E5FB  1  A9 00                lda #0
+00E5FD  1  85 8A                sta D3
+00E5FF  1  20 6A E6     @b:     jsr btnrect
+00E602  1  A9 00                lda #0
+00E604  1  8D 28 D3             sta ROP
+00E607  1  A9 01                lda #1
+00E609  1  8D 14 D3             sta BCOL
+00E60C  1  A9 04                lda #C_BOX
+00E60E  1  8D 18 D3             sta BCMD
+00E611  1  A5 84 18 69          ADDW D0, D0, 15         ; the label in the middle
+00E615  1  0F 85 84 A5  
+00E619  1  85 69 00 85  
+00E61E  1  A5 86 18 69          ADDW D1, D1, 7
+00E622  1  07 85 86 A5  
+00E626  1  87 69 00 85  
+00E62B  1  A5 84                lda D0
+00E62D  1  8D 10 D3             sta BX0
+00E630  1  A5 85                lda D0+1
+00E632  1  8D 1A D3             sta BX0H
+00E635  1  A5 86                lda D1
+00E637  1  8D 11 D3             sta BY0
+00E63A  1  A5 87                lda D1+1
+00E63C  1  8D 1B D3             sta BY0H
+00E63F  1  A9 01                lda #S_BOLD
+00E641  1  8D 2B D3             sta STYLE
+00E644  1  A6 8A                ldx D3
+00E646  1  BD 5A E6             lda labels,x
+00E649  1  8D 2C D3             sta CHOUT
+00E64C  1  A9 00                lda #0
+00E64E  1  8D 2B D3             sta STYLE
+00E651  1  E6 8A                inc D3
+00E653  1  A5 8A                lda D3
+00E655  1  C9 10                cmp #16
+00E657  1  D0 A6                bne @b
+00E659  1  60                   rts
+00E65A  1  37 38 39 2F  labels: .byte "789/456*123-C0=+"
+00E65E  1  34 35 36 2A  
+00E662  1  31 32 33 2D  
+00E66A  1               
+00E66A  1               ; Blitter X0..Y1 = button D3 (D0, D1 = its top left)
+00E66A  1               btnrect:
+00E66A  1  A5 8A                lda D3
+00E66C  1  29 03                and #3
+00E66E  1  AA                   tax
+00E66F  1  A5 02                lda r0
+00E671  1  18                   clc
+00E672  1  7D CB E6             adc bxo,x
+00E675  1  85 84                sta D0
+00E677  1  8D 10 D3             sta BX0
+00E67A  1  A5 03                lda r0+1
+00E67C  1  69 00                adc #0
+00E67E  1  85 85                sta D0+1
+00E680  1  8D 1A D3             sta BX0H
+00E683  1  A5 8A                lda D3
+00E685  1  4A                   lsr
+00E686  1  4A                   lsr
+00E687  1  AA                   tax
+00E688  1  A5 04                lda r1
+00E68A  1  18                   clc
+00E68B  1  7D CF E6             adc byo,x
+00E68E  1  85 86                sta D1
+00E690  1  8D 11 D3             sta BY0
+00E693  1  A5 05                lda r1+1
+00E695  1  69 00                adc #0
+00E697  1  85 87                sta D1+1
+00E699  1  8D 1B D3             sta BY0H
+00E69C  1  A5 84 18 69          ADDW D2, D0, 36
+00E6A0  1  24 85 88 A5  
+00E6A4  1  85 69 00 85  
+00E6A9  1  A5 88                lda D2
+00E6AB  1  8D 12 D3             sta BX1
+00E6AE  1  A5 89                lda D2+1
+00E6B0  1  8D 1C D3             sta BX1H
+00E6B3  1  A5 86 18 69          ADDW D2, D1, 29
+00E6B7  1  1D 85 88 A5  
+00E6BB  1  87 69 00 85  
+00E6C0  1  A5 88                lda D2
+00E6C2  1  8D 13 D3             sta BY1
+00E6C5  1  A5 89                lda D2+1
+00E6C7  1  8D 1D D3             sta BY1H
+00E6CA  1  60                   rts
+00E6CB  1  09 31 59 81  bxo:    .byte 9, 49, 89, 129
+00E6CF  1  28 4A 6C 8E  byo:    .byte 40, 74, 108, 142
+00E6D3  1               
+00E6D3  1               ; The number display (r0-r3 = the window's contents)
+00E6D3  1               display:
+00E6D3  1  A9 00                lda #0
+00E6D5  1  8D 28 D3             sta ROP
+00E6D8  1  8D 29 D3             sta PATON
+00E6DB  1  A5 02 18 69          ADDW D0, r0, 8
+00E6DF  1  08 85 84 A5  
+00E6E3  1  03 69 00 85  
+00E6E8  1  A5 04 18 69          ADDW D1, r1, 6
+00E6EC  1  06 85 86 A5  
+00E6F0  1  05 69 00 85  
+00E6F5  1  A5 06 38 E9          SUBW D2, r2, 8
+00E6F9  1  08 85 88 A5  
+00E6FD  1  07 E9 00 85  
+00E702  1  A5 84                lda D0
+00E704  1  8D 10 D3             sta BX0
+00E707  1  A5 85                lda D0+1
+00E709  1  8D 1A D3             sta BX0H
+00E70C  1  A5 86                lda D1
+00E70E  1  8D 11 D3             sta BY0
+00E711  1  A5 87                lda D1+1
+00E713  1  8D 1B D3             sta BY0H
+00E716  1  A5 88                lda D2
+00E718  1  8D 12 D3             sta BX1
+00E71B  1  A5 89                lda D2+1
+00E71D  1  8D 1C D3             sta BX1H
+00E720  1  A5 04 18 69          ADDW D1, r1, 28
+00E724  1  1C 85 86 A5  
+00E728  1  05 69 00 85  
+00E72D  1  A5 86                lda D1
+00E72F  1  8D 13 D3             sta BY1
+00E732  1  A5 87                lda D1+1
+00E734  1  8D 1D D3             sta BY1H
+00E737  1  A9 00                lda #0
+00E739  1  8D 14 D3             sta BCOL
+00E73C  1  A9 05                lda #C_BOXF
+00E73E  1  8D 18 D3             sta BCMD
+00E741  1  A9 01                lda #1
+00E743  1  8D 14 D3             sta BCOL
+00E746  1  A9 04                lda #C_BOX
+00E748  1  8D 18 D3             sta BCMD
+00E74B  1  20 E1 E0             jsr sbegin              ; the number (or "Error")
+00E74E  1  AD D5 EA             lda ERR
+00E751  1  F0 0A                beq @num
+00E753  1  A9 CC                lda #<s_error
+00E755  1  A2 E7                ldx #>s_error
+00E757  1  20 F6 E0             jsr sstr
+00E75A  1  4C 79 E7             jmp @show
+00E75D  1  A2 03        @num:   ldx #3
+00E75F  1  AD D4 EA             lda ENT
+00E762  1  D0 0A                bne @cur
+00E764  1  BD CB EA     @acc:   lda ACC,x
+00E767  1  95 A0                sta A32,x
+00E769  1  CA                   dex
+00E76A  1  10 F8                bpl @acc
+00E76C  1  30 08                bmi @p
+00E76E  1  BD CF EA     @cur:   lda CUR,x
+00E771  1  95 A0                sta A32,x
+00E773  1  CA                   dex
+00E774  1  10 F8                bpl @cur
+00E776  1  20 94 EA     @p:     jsr print32
+00E779  1  AD C9 EA     @show:  lda SLEN                ; right-aligned: x = r2 - 12 - len * 8
+00E77C  1  0A                   asl
+00E77D  1  0A                   asl
+00E77E  1  0A                   asl
+00E77F  1  85 88                sta D2
+00E781  1  A5 06 38 E9          SUBW D0, r2, 12
+00E785  1  0C 85 84 A5  
+00E789  1  07 E9 00 85  
+00E78E  1  A5 84                lda D0
+00E790  1  38                   sec
+00E791  1  E5 88                sbc D2
+00E793  1  8D 10 D3             sta BX0
+00E796  1  A5 85                lda D0+1
+00E798  1  E9 00                sbc #0
+00E79A  1  8D 1A D3             sta BX0H
+00E79D  1  A5 04 18 69          ADDW D1, r1, 9
+00E7A1  1  09 85 86 A5  
+00E7A5  1  05 69 00 85  
+00E7AA  1  A5 86                lda D1
+00E7AC  1  8D 11 D3             sta BY0
+00E7AF  1  A5 87                lda D1+1
+00E7B1  1  8D 1B D3             sta BY0H
+00E7B4  1  A9 01                lda #S_BOLD
+00E7B6  1  8D 2B D3             sta STYLE
+00E7B9  1  A2 00                ldx #0
+00E7BB  1  BD 00 C3     @c:     lda SCRATCH,x
+00E7BE  1  F0 06                beq @e
+00E7C0  1  8D 2C D3             sta CHOUT
+00E7C3  1  E8                   inx
+00E7C4  1  D0 F5                bne @c
+00E7C6  1  A9 00        @e:     lda #0
+00E7C8  1  8D 2B D3             sta STYLE
+00E7CB  1  60                   rts
+00E7CC  1  45 72 72 6F  s_error: .byte "Error", 0
+00E7D0  1  72 00        
+00E7D2  1               
+00E7D2  1               ; A click: which button?
+00E7D2  1  8E CA EA     cclick: stx CWIN
+00E7D5  1  A5 02 38 E9          SUBW D0, r0, 9          ; column: (x - 9) / 40, inside the first 37
+00E7D9  1  09 85 84 A5  
+00E7DD  1  03 E9 00 85  
+00E7E2  1  30 74                bmi @r
+00E7E4  1  A5 85                lda D0+1
+00E7E6  1  D0 70                bne @r
+00E7E8  1  A5 84                lda D0
+00E7EA  1  A2 00                ldx #0
+00E7EC  1  C9 28        @c:     cmp #40
+00E7EE  1  90 08                bcc @cd
+00E7F0  1  E9 28                sbc #40
+00E7F2  1  E8                   inx
+00E7F3  1  E0 04                cpx #4
+00E7F5  1  D0 F5                bne @c
+00E7F7  1  60                   rts
+00E7F8  1  C9 25        @cd:    cmp #37
+00E7FA  1  B0 5C                bcs @r
+00E7FC  1  86 8A                stx D3
+00E7FE  1  A5 04 38 E9          SUBW D1, r1, 40         ; row: (y - 40) / 34, inside the first 30
+00E802  1  28 85 86 A5  
+00E806  1  05 E9 00 85  
+00E80B  1  30 4B                bmi @r
+00E80D  1  A5 87                lda D1+1
+00E80F  1  D0 47                bne @r
+00E811  1  A5 86                lda D1
+00E813  1  A2 00                ldx #0
+00E815  1  C9 22        @w:     cmp #34
+00E817  1  90 08                bcc @wd
+00E819  1  E9 22                sbc #34
+00E81B  1  E8                   inx
+00E81C  1  E0 04                cpx #4
+00E81E  1  D0 F5                bne @w
+00E820  1  60                   rts
+00E821  1  C9 1E        @wd:    cmp #30
+00E823  1  B0 33                bcs @r
+00E825  1  8A                   txa
+00E826  1  0A                   asl
+00E827  1  0A                   asl
+00E828  1  05 8A                ora D3
+00E82A  1  85 8A                sta D3
+00E82C  1  AE CA EA             ldx CWIN                ; the button blinks
+00E82F  1  A9 08 20 88          TK TK_SETPORT
+00E833  1  CC           
+00E834  1  20 6A E6             jsr btnrect
+00E837  1  20 59 E8             jsr invbtn
+00E83A  1  A0 05                ldy #5
+00E83C  1  AD 01 D0     @wt:    lda FRAME
+00E83F  1  CD 01 D0     @wf:    cmp FRAME
+00E842  1  F0 FB                beq @wf
+00E844  1  88                   dey
+00E845  1  D0 F5                bne @wt
+00E847  1  20 6A E6             jsr btnrect
+00E84A  1  20 59 E8             jsr invbtn
+00E84D  1  A6 8A                ldx D3
+00E84F  1  BD 5A E6             lda labels,x
+00E852  1  AE CA EA             ldx CWIN
+00E855  1  4C 69 E8             jmp ckey
+00E858  1  60           @r:     rts
+00E859  1  A9 04        invbtn: lda #R_INV
+00E85B  1  8D 28 D3             sta ROP
+00E85E  1  A9 05                lda #C_BOXF
+00E860  1  8D 18 D3             sta BCMD
+00E863  1  A9 00                lda #R_SET
+00E865  1  8D 28 D3             sta ROP
+00E868  1  60                   rts
+00E869  1               
+00E869  1               ; A key (A) for the calculator in window X
+00E869  1  8E CA EA     ckey:   stx CWIN
+00E86C  1  C9 63                cmp #'c'
+00E86E  1  F0 57                beq @clr
+00E870  1  C9 43                cmp #'C'
+00E872  1  F0 53                beq @clr
+00E874  1  C9 1B                cmp #27
+00E876  1  F0 4F                beq @clr
+00E878  1  C9 0D                cmp #13
+00E87A  1  D0 02                bne @k1
+00E87C  1  A9 3D                lda #'='
+00E87E  1  C9 30        @k1:    cmp #'0'
+00E880  1  90 5E                bcc @op
+00E882  1  C9 3A                cmp #'9'+1
+00E884  1  B0 5A                bcs @op
+00E886  1  29 0F                and #$0F                ; a digit: CUR = CUR * 10 + d
+00E888  1  48                   pha
+00E889  1  AD D5 EA             lda ERR
+00E88C  1  D0 37                bne @pd
+00E88E  1  AD D4 EA             lda ENT
+00E891  1  D0 08                bne @more
+00E893  1  20 7F E9             jsr curzero
+00E896  1  A9 01                lda #1
+00E898  1  8D D4 EA             sta ENT
+00E89B  1  A2 03        @more:  ldx #3
+00E89D  1  BD CF EA     @cp:    lda CUR,x
+00E8A0  1  95 A0                sta A32,x
+00E8A2  1  CA                   dex
+00E8A3  1  10 F8                bpl @cp
+00E8A5  1  A9 0A                lda #10
+00E8A7  1  20 A0 E9             jsr setb
+00E8AA  1  20 CB E9             jsr mul32
+00E8AD  1  68                   pla
+00E8AE  1  18                   clc
+00E8AF  1  65 A0                adc A32
+00E8B1  1  8D CF EA             sta CUR
+00E8B4  1  A2 01                ldx #1
+00E8B6  1  B5 A0        @cy:    lda A32,x
+00E8B8  1  69 00                adc #0
+00E8BA  1  9D CF EA             sta CUR,x
+00E8BD  1  E8                   inx
+00E8BE  1  E0 04                cpx #4
+00E8C0  1  D0 F4                bne @cy
+00E8C2  1  4C 74 E9             jmp redisp
+00E8C5  1  68           @pd:    pla
+00E8C6  1  60                   rts
+00E8C7  1  A9 00        @clr:   lda #0
+00E8C9  1  8D D5 EA             sta ERR
+00E8CC  1  8D D4 EA             sta ENT
+00E8CF  1  8D D3 EA             sta OP
+00E8D2  1  20 7F E9             jsr curzero
+00E8D5  1  A2 03                ldx #3
+00E8D7  1  9D CB EA     @z:     sta ACC,x
+00E8DA  1  CA                   dex
+00E8DB  1  10 FA                bpl @z
+00E8DD  1  4C 74 E9             jmp redisp
+00E8E0  1  C9 08        @op:    cmp #8                  ; Backspace: CUR / 10
+00E8E2  1  D0 16                bne @o2
+00E8E4  1  AD D4 EA             lda ENT
+00E8E7  1  F0 2C                beq @rts
+00E8E9  1  20 8A E9             jsr cur2a
+00E8EC  1  A9 0A                lda #10
+00E8EE  1  20 A0 E9             jsr setb
+00E8F1  1  20 02 EA             jsr div32
+00E8F4  1  20 95 E9             jsr a2cur
+00E8F7  1  4C 74 E9             jmp redisp
+00E8FA  1  A2 05        @o2:    ldx #5
+00E8FC  1  CA           @f:     dex
+00E8FD  1  30 16                bmi @rts
+00E8FF  1  DD 16 E9             cmp ops,x
+00E902  1  D0 F8                bne @f
+00E904  1  48                   pha
+00E905  1  20 1B E9             jsr apply               ; the pending operation first
+00E908  1  68                   pla
+00E909  1  C9 3D                cmp #'='
+00E90B  1  D0 02                bne @set
+00E90D  1  A9 00                lda #0
+00E90F  1  8D D3 EA     @set:   sta OP
+00E912  1  4C 74 E9             jmp redisp
+00E915  1  60           @rts:   rts
+00E916  1  2B 2D 2A 2F  ops:    .byte "+-*/="
+00E91A  1  3D           
+00E91B  1               
+00E91B  1               ; ACC = ACC (OP) CUR if a number was typed; = also comes here
+00E91B  1  AD D4 EA     apply:  lda ENT
+00E91E  1  F0 15                beq @r
+00E920  1  A9 00                lda #0
+00E922  1  8D D4 EA             sta ENT
+00E925  1  AD D3 EA             lda OP
+00E928  1  D0 0C                bne @calc
+00E92A  1  A2 03                ldx #3                  ; no operation yet: ACC = CUR
+00E92C  1  BD CF EA     @c:     lda CUR,x
+00E92F  1  9D CB EA             sta ACC,x
+00E932  1  CA                   dex
+00E933  1  10 F7                bpl @c
+00E935  1  60           @r:     rts
+00E936  1  A2 03        @calc:  ldx #3
+00E938  1  BD CB EA     @a:     lda ACC,x
+00E93B  1  95 A0                sta A32,x
+00E93D  1  BD CF EA             lda CUR,x
+00E940  1  95 A4                sta B32,x
+00E942  1  CA                   dex
+00E943  1  10 F3                bpl @a
+00E945  1  AD D3 EA             lda OP
+00E948  1  C9 2B                cmp #'+'
+00E94A  1  D0 06                bne @n1
+00E94C  1  20 AB E9             jsr add32
+00E94F  1  4C 69 E9             jmp @done
+00E952  1  C9 2D        @n1:    cmp #'-'
+00E954  1  D0 06                bne @n2
+00E956  1  20 BB E9             jsr sub32
+00E959  1  4C 69 E9             jmp @done
+00E95C  1  C9 2A        @n2:    cmp #'*'
+00E95E  1  D0 06                bne @n3
+00E960  1  20 CB E9             jsr mul32
+00E963  1  4C 69 E9             jmp @done
+00E966  1  20 02 EA     @n3:    jsr div32
+00E969  1  A2 03        @done:  ldx #3
+00E96B  1  B5 A0        @d:     lda A32,x
+00E96D  1  9D CB EA             sta ACC,x
+00E970  1  CA                   dex
+00E971  1  10 F8                bpl @d
+00E973  1  60                   rts
+00E974  1               
+00E974  1  AE CA EA     redisp: ldx CWIN
+00E977  1  A9 08 20 88          TK TK_SETPORT
+00E97B  1  CC           
+00E97C  1  4C D3 E6             jmp display
+00E97F  1               
+00E97F  1               curzero:
+00E97F  1  A9 00                lda #0
+00E981  1  A2 03                ldx #3
+00E983  1  9D CF EA     @z:     sta CUR,x
+00E986  1  CA                   dex
+00E987  1  10 FA                bpl @z
+00E989  1  60                   rts
+00E98A  1  A2 03        cur2a:  ldx #3
+00E98C  1  BD CF EA     @c:     lda CUR,x
+00E98F  1  95 A0                sta A32,x
+00E991  1  CA                   dex
+00E992  1  10 F8                bpl @c
+00E994  1  60                   rts
+00E995  1  A2 03        a2cur:  ldx #3
+00E997  1  B5 A0        @c:     lda A32,x
+00E999  1  9D CF EA             sta CUR,x
+00E99C  1  CA                   dex
+00E99D  1  10 F8                bpl @c
+00E99F  1  60                   rts
+00E9A0  1  85 A4        setb:   sta B32
+00E9A2  1  A9 00                lda #0
+00E9A4  1  85 A5                sta B32+1
+00E9A6  1  85 A6                sta B32+2
+00E9A8  1  85 A7                sta B32+3
+00E9AA  1  60                   rts
+00E9AB  1               
+00E9AB  1               ; --- 32-bit arithmetic on A32, B32 -------------------------------------------------------
+00E9AB  1  18           add32:  clc
+00E9AC  1  A2 00                ldx #0
+00E9AE  1  B5 A0        @l:     lda A32,x
+00E9B0  1  75 A4                adc B32,x
+00E9B2  1  95 A0                sta A32,x
+00E9B4  1  E8                   inx
+00E9B5  1  8A                   txa
+00E9B6  1  49 04                eor #4
+00E9B8  1  D0 F4                bne @l
+00E9BA  1  60                   rts
+00E9BB  1  38           sub32:  sec
+00E9BC  1  A2 00                ldx #0
+00E9BE  1  B5 A0        @l:     lda A32,x
+00E9C0  1  F5 A4                sbc B32,x
+00E9C2  1  95 A0                sta A32,x
+00E9C4  1  E8                   inx
+00E9C5  1  8A                   txa
+00E9C6  1  49 04                eor #4
+00E9C8  1  D0 F4                bne @l
+00E9CA  1  60                   rts
+00E9CB  1               ; A32 = A32 * B32 (the low 32 bits: right for signed numbers too)
+00E9CB  1  A2 03        mul32:  ldx #3
+00E9CD  1  B5 A0        @c:     lda A32,x
+00E9CF  1  95 A8                sta R32,x
+00E9D1  1  A9 00                lda #0
+00E9D3  1  95 A0                sta A32,x
+00E9D5  1  CA                   dex
+00E9D6  1  10 F5                bpl @c
+00E9D8  1  A9 20                lda #32
+00E9DA  1  85 AD                sta CNT
+00E9DC  1  46 AB        @l:     lsr R32+3               ; next bit of the multiplier
+00E9DE  1  66 AA                ror R32+2
+00E9E0  1  66 A9                ror R32+1
+00E9E2  1  66 A8                ror R32
+00E9E4  1  90 0F                bcc @n
+00E9E6  1  18                   clc
+00E9E7  1  A2 00                ldx #0
+00E9E9  1  B5 A0        @a:     lda A32,x
+00E9EB  1  75 A4                adc B32,x
+00E9ED  1  95 A0                sta A32,x
+00E9EF  1  E8                   inx
+00E9F0  1  8A                   txa
+00E9F1  1  49 04                eor #4
+00E9F3  1  D0 F4                bne @a
+00E9F5  1  06 A4        @n:     asl B32
+00E9F7  1  26 A5                rol B32+1
+00E9F9  1  26 A6                rol B32+2
+00E9FB  1  26 A7                rol B32+3
+00E9FD  1  C6 AD                dec CNT
+00E9FF  1  D0 DB                bne @l
+00EA01  1  60                   rts
+00EA02  1               ; A32 = A32 / B32 (signed, towards 0); B32 = 0 sets ERR
+00EA02  1  A5 A4        div32:  lda B32
+00EA04  1  05 A5                ora B32+1
+00EA06  1  05 A6                ora B32+2
+00EA08  1  05 A7                ora B32+3
+00EA0A  1  D0 06                bne @ok
+00EA0C  1  A9 01                lda #1
+00EA0E  1  8D D5 EA             sta ERR
+00EA11  1  60                   rts
+00EA12  1  A5 A3        @ok:    lda A32+3
+00EA14  1  45 A7                eor B32+3
+00EA16  1  85 AC                sta SIGN
+00EA18  1  A5 A3                lda A32+3
+00EA1A  1  10 03                bpl @ap
+00EA1C  1  20 74 EA             jsr negA
+00EA1F  1  A5 A7        @ap:    lda B32+3
+00EA21  1  10 03                bpl @bp
+00EA23  1  20 78 EA             jsr negB
+00EA26  1  A9 00        @bp:    lda #0                  ; unsigned: A32 = quotient, R32 = remainder
+00EA28  1  85 A8                sta R32
+00EA2A  1  85 A9                sta R32+1
+00EA2C  1  85 AA                sta R32+2
+00EA2E  1  85 AB                sta R32+3
+00EA30  1  A9 20                lda #32
+00EA32  1  85 AD                sta CNT
+00EA34  1  06 A0        @l:     asl A32
+00EA36  1  26 A1                rol A32+1
+00EA38  1  26 A2                rol A32+2
+00EA3A  1  26 A3                rol A32+3
+00EA3C  1  26 A8                rol R32
+00EA3E  1  26 A9                rol R32+1
+00EA40  1  26 AA                rol R32+2
+00EA42  1  26 AB                rol R32+3
+00EA44  1  38                   sec                     ; R32 - B32
+00EA45  1  A5 A8                lda R32
+00EA47  1  E5 A4                sbc B32
+00EA49  1  AA                   tax
+00EA4A  1  A5 A9                lda R32+1
+00EA4C  1  E5 A5                sbc B32+1
+00EA4E  1  A8                   tay
+00EA4F  1  A5 AA                lda R32+2
+00EA51  1  E5 A6                sbc B32+2
+00EA53  1  48                   pha
+00EA54  1  A5 AB                lda R32+3
+00EA56  1  E5 A7                sbc B32+3
+00EA58  1  90 0D                bcc @no                 ; (the pushed byte is dropped)
+00EA5A  1  85 AB                sta R32+3
+00EA5C  1  68                   pla
+00EA5D  1  85 AA                sta R32+2
+00EA5F  1  84 A9                sty R32+1
+00EA61  1  86 A8                stx R32
+00EA63  1  E6 A0                inc A32
+00EA65  1  D0 01                bne @nx
+00EA67  1  68           @no:    pla
+00EA68  1  C6 AD        @nx:    dec CNT
+00EA6A  1  D0 C8                bne @l
+00EA6C  1  A5 AC                lda SIGN
+00EA6E  1  10 03                bpl @r
+00EA70  1  20 74 EA             jsr negA
+00EA73  1  60           @r:     rts
+00EA74  1  A2 A0        negA:   ldx #A32
+00EA76  1  D0 02                bne neg
+00EA78  1  A2 A4        negB:   ldx #B32
+00EA7A  1  38           neg:    sec
+00EA7B  1  A9 00                lda #0
+00EA7D  1  F5 00                sbc 0,x
+00EA7F  1  95 00                sta 0,x
+00EA81  1  A9 00                lda #0
+00EA83  1  F5 01                sbc 1,x
+00EA85  1  95 01                sta 1,x
+00EA87  1  A9 00                lda #0
+00EA89  1  F5 02                sbc 2,x
+00EA8B  1  95 02                sta 2,x
+00EA8D  1  A9 00                lda #0
+00EA8F  1  F5 03                sbc 3,x
+00EA91  1  95 03                sta 3,x
+00EA93  1  60                   rts
+00EA94  1               
+00EA94  1               ; A32 as signed decimal into SCRATCH
+00EA94  1               print32:
+00EA94  1  A5 A3                lda A32+3
+00EA96  1  10 08                bpl @pos
+00EA98  1  A9 2D                lda #'-'
+00EA9A  1  20 E7 E0             jsr sput
+00EA9D  1  20 74 EA             jsr negA
+00EAA0  1  A9 00        @pos:   lda #0                  ; digits backwards onto the stack
+00EAA2  1  8D D6 EA             sta DIGN
+00EAA5  1  A9 0A        @d:     lda #10                 ; (positive now)
+00EAA7  1  20 A0 E9             jsr setb
+00EAAA  1  20 02 EA             jsr div32
+00EAAD  1  A5 A8                lda R32                 ; the remainder is the digit
+00EAAF  1  09 30                ora #'0'
+00EAB1  1  48                   pha
+00EAB2  1  EE D6 EA             inc DIGN
+00EAB5  1  A5 A0                lda A32
+00EAB7  1  05 A1                ora A32+1
+00EAB9  1  05 A2                ora A32+2
+00EABB  1  05 A3                ora A32+3
+00EABD  1  D0 E6                bne @d
+00EABF  1  68           @o:     pla
+00EAC0  1  20 E7 E0             jsr sput
+00EAC3  1  CE D6 EA             dec DIGN
+00EAC6  1  D0 F7                bne @o
+00EAC8  1  60                   rts
+00EAC9  1               
+00EAC9  1               
+00EAC9  1               ; --- variables ---------------------------------------------------------------------------
+00EAC9  1  xx           SLEN:   .res 1
+00EACA  1  xx           CWIN:   .res 1
+00EACB  1  xx xx xx xx  ACC:    .res 4
+00EACF  1  xx xx xx xx  CUR:    .res 4
+00EAD3  1  xx           OP:     .res 1
+00EAD4  1  xx           ENT:    .res 1
+00EAD5  1  xx           ERR:    .res 1
+00EAD6  1  xx           DIGN:   .res 1
+00EAD6  1               

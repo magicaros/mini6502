@@ -1,0 +1,26 @@
+Modules list:
+-------------
+desk1.o:
+    CODE              Offs=000000  Size=000E5F  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  00E000  00EE5E  000E5F  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

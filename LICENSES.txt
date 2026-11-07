@@ -1,0 +1,27 @@
+ mini6502 - licences
+===================
+
+mini6502 (the QB64 host mini6502.bas, the monitor ROM, the toolkit, the
+desktop, the editor, the music engine, the demos, the hw tools and the
+simulator scripts):
+  Copyright (C) 2026 Benoit Colson. With the help of Claude AI.
+  Free software: you can redistribute it and/or modify it under the terms
+  of the GNU General Public License as published by the Free Software
+  Foundation, either version 3 of the License, or (at your option) any
+  later version. It is distributed WITHOUT ANY WARRANTY; without even the
+  implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+  The full text is in COPYING.
+
+The 6502 core (fake6502.bi, fake6502.bm):
+  Based on Fake6502 (c) 2011-2013 Mike Chambers, released into the public
+  domain; the QB64 translation is likewise in the public domain.
+
+mini6502 BASIC (basic/) and its extensions (basicx/, e.g. GFX):
+  Derived from EhBASIC by Lee Davison: free for personal, non-commercial
+  use only, under the EhBASIC licence quoted in basic/README.txt (for
+  commercial use, Lee Davison's conditions apply). The mini6502 additions
+  are Copyright (C) 2026 Benoit Colson, with the help of Claude AI, under
+  the same terms.
+
+The lullaby demo plays Brahms' Lullaby (1868), a melody in the public
+domain; the demo's code is under the GPL like the rest of mini6502.

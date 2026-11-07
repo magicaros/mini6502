@@ -1,0 +1,775 @@
+ca65 V2.19 - Git 52727a5
+Main file   : breakout.asm
+Current file: breakout.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; breakout.asm - a small Breakout for mini6502             (main RAM, $0800)
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain. 160x200 graphics with the text layer on top for the score,
+000000r 1               ; the mouse moves the paddle, a click launches the ball, Esc quits.
+000000r 1               ;
+000000r 1               ;   from the desktop: double-click BREAKOUT
+000000r 1               ;   from the monitor: L BREAKOUT  then  0800R
+000000r 1               ;   from BASIC:       LOAD with the monitor first, then CALL $0800 (it loads
+000000r 1               ;                     over BASIC's program area)
+000000r 1               ; Uses no zero page and nothing outside $0800-its end, so it can return to
+000000r 1               ; whoever called it.
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1               SYSCTL  = $D000
+000000r 1               FRAME   = $D001
+000000r 1               KBD     = $D010
+000000r 1               KBDCR   = $D011
+000000r 1               DSP     = $D012
+000000r 1               CURX    = $D015
+000000r 1               CURY    = $D016
+000000r 1               COLOR   = $D021
+000000r 1               NOTE    = $D030         ; voice 1: NOTE, VOL, WAVE, DUR
+000000r 1               VOL     = $D031
+000000r 1               WAVE    = $D032
+000000r 1               DUR     = $D033
+000000r 1               NOTE2   = $D034         ; voice 2
+000000r 1               VOL2    = $D035
+000000r 1               WAVE2   = $D036
+000000r 1               DUR2    = $D037
+000000r 1               PADR    = $D200         ; port A
+000000r 1               PDATA   = $D203
+000000r 1               PSTEP   = $D204
+000000r 1               MODE    = $D300
+000000r 1               BX0     = $D310         ; blitter
+000000r 1               BY0     = $D311
+000000r 1               BX1     = $D312
+000000r 1               BY1     = $D313
+000000r 1               BCOL    = $D314
+000000r 1               BCMD    = $D318
+000000r 1               SPR     = $D400         ; sprite N: X, Y, IMAGE, FLAGS at $D400 + 8N
+000000r 1               CLICKS  = $D506
+000000r 1               PTR     = $D508
+000000r 1               MOUSEX  = $D550         ; mouse X in 160x200 pixels
+000000r 1               
+000000r 1               C_CLEAR = 1
+000000r 1               C_BOXF  = 5
+000000r 1               
+000000r 1               COLS    = 12            ; bricks: 12 x 6, 11 x 5 pixels, 12 x 6 apart
+000000r 1               BROWS   = 6
+000000r 1               NBRICKS = COLS * BROWS
+000000r 1               BRX     = 8             ; first brick's left edge
+000000r 1               BRY     = 24            ; first brick's top edge
+000000r 1               LEFTW   = 4             ; the walls: x 0-3 and 156-159, y 8-11 at the top
+000000r 1               RIGHTW  = 156
+000000r 1               TOPW    = 12
+000000r 1               PADY    = 186           ; paddle: 20 x 3 at y 186
+000000r 1               PADW    = 20
+000000r 1               BALLW   = 2             ; ball: 2 x 3
+000000r 1               BALLH   = 3
+000000r 1               
+000000r 1                       .org $0800
+000800  1               
+000800  1               start:
+000800  1  D8                   cld
+000801  1  BA                   tsx                     ; to return from anywhere (Esc)
+000802  1  8E 25 0F             stx savesp
+000805  1  A9 03                lda #3                  ; video and sound as at power-on
+000807  1  8D 00 D0             sta SYSCTL
+00080A  1  A9 0F                lda #$0F                ; text layer cleared: see-through (black
+00080C  1  8D 21 D0             sta COLOR               ; background = TRANSP 0)
+00080F  1  A9 02                lda #2
+000811  1  8D 00 D0             sta SYSCTL
+000814  1  20 C2 0D             jsr images
+000817  1  A9 01                lda #1                  ; paddle: sprites 1 and 2, images 1 and 2
+000819  1  8D 0A D4             sta SPR+10
+00081C  1  8D 0B D4             sta SPR+11
+00081F  1  8D 13 D4             sta SPR+19
+000822  1  A9 02                lda #2
+000824  1  8D 12 D4             sta SPR+18
+000827  1  A9 00                lda #0                  ; ball: sprite 0, image 0
+000829  1  8D 02 D4             sta SPR+2
+00082C  1  A9 02                lda #2                  ; graphics, the text layer on top
+00082E  1  8D 00 D3             sta MODE
+000831  1  A9 0C                lda #12                 ; sound: voice 1 square, voice 2 triangle
+000833  1  8D 31 D0             sta VOL
+000836  1  8D 35 D0             sta VOL2
+000839  1  A9 00                lda #0
+00083B  1  8D 32 D0             sta WAVE
+00083E  1  A9 01                lda #1
+000840  1  8D 36 D0             sta WAVE2
+000843  1               
+000843  1               newgame:
+000843  1  A9 03                lda #3
+000845  1  8D 31 0F             sta lives
+000848  1  A9 01                lda #1
+00084A  1  8D 32 0F             sta level
+00084D  1  A9 00                lda #0
+00084F  1  8D 33 0F             sta score
+000852  1  8D 34 0F             sta score+1
+000855  1               newlevel:
+000855  1  20 8C 0B             jsr setbricks
+000858  1  20 9C 0B             jsr drawfield
+00085B  1  20 58 0C             jsr status
+00085E  1  20 08 09             jsr serve
+000861  1               
+000861  1               ; --- the game loop: once a frame ---------------------------------------------------
+000861  1  AD 01 D0     loop:   lda FRAME
+000864  1  CD 01 D0     @w:     cmp FRAME
+000867  1  F0 FB                beq @w
+000869  1  AD 11 D0             lda KBDCR               ; Esc quits
+00086C  1  10 0C                bpl @nokey
+00086E  1  AD 10 D0             lda KBD
+000871  1  29 7F                and #$7F
+000873  1  C9 1B                cmp #27
+000875  1  D0 03                bne @nokey
+000877  1  4C F4 08             jmp quit
+00087A  1  20 77 09     @nokey: jsr paddle
+00087D  1  AD 2F 0F             lda stuck
+000880  1  F0 10                beq @move
+000882  1  20 23 09             jsr onpaddle            ; waiting on the paddle for a click
+000885  1  AD 06 D5             lda CLICKS
+000888  1  29 01                and #1
+00088A  1  F0 11                beq @show
+00088C  1  20 3A 09             jsr launch
+00088F  1  4C 9D 08             jmp @show
+000892  1  20 B7 09     @move:  jsr moveball
+000895  1  AD 30 0F             lda lost
+000898  1  F0 03                beq @show
+00089A  1  4C B0 08             jmp loseball
+00089D  1  20 A4 09     @show:  jsr ballspr
+0008A0  1  AD 35 0F             lda left
+0008A3  1  D0 BC                bne loop
+0008A5  1  EE 32 0F             inc level               ; all gone: next level, a little faster
+0008A8  1  A9 54                lda #84
+0008AA  1  20 83 0B             jsr sound2
+0008AD  1  4C 55 08             jmp newlevel
+0008B0  1               
+0008B0  1               ; A ball lost: one life less; none left: game over
+0008B0  1               loseball:
+0008B0  1  A9 24                lda #36
+0008B2  1  A2 1E                ldx #30
+0008B4  1  20 7C 0B             jsr sound
+0008B7  1  CE 31 0F             dec lives
+0008BA  1  20 58 0C             jsr status
+0008BD  1  AD 31 0F             lda lives
+0008C0  1  F0 06                beq gameover
+0008C2  1  20 08 09             jsr serve
+0008C5  1  4C 61 08             jmp loop
+0008C8  1               
+0008C8  1               gameover:
+0008C8  1  A9 00                lda #0                  ; ball away
+0008CA  1  8D 03 D4             sta SPR+3
+0008CD  1  A9 75                lda #<s_over
+0008CF  1  A2 0D                ldx #>s_over
+0008D1  1  A0 18                ldy #24
+0008D3  1  20 AC 0C             jsr message
+0008D6  1  AD 06 D5             lda CLICKS
+0008D9  1  AD 11 D0     @w:     lda KBDCR
+0008DC  1  10 09                bpl @m
+0008DE  1  AD 10 D0             lda KBD
+0008E1  1  29 7F                and #$7F
+0008E3  1  C9 1B                cmp #27
+0008E5  1  F0 0D                beq quit
+0008E7  1  AD 06 D5     @m:     lda CLICKS
+0008EA  1  29 01                and #1
+0008EC  1  F0 EB                beq @w
+0008EE  1  20 D7 0C             jsr clearmsg
+0008F1  1  4C 43 08             jmp newgame
+0008F4  1               
+0008F4  1  AE 25 0F     quit:   ldx savesp
+0008F7  1  9A                   txs
+0008F8  1  A9 03                lda #3                  ; everything as at power-on: text mode
+0008FA  1  8D 00 D0             sta SYSCTL
+0008FD  1  A9 07                lda #$07
+0008FF  1  8D 21 D0             sta COLOR
+000902  1  A9 02                lda #2
+000904  1  8D 00 D0             sta SYSCTL              ; clear the screen
+000907  1  60                   rts
+000908  1               
+000908  1               ; --- the ball waiting on the paddle ----------------------------------------------------
+000908  1  A9 01        serve:  lda #1
+00090A  1  8D 2F 0F             sta stuck
+00090D  1  A9 00                lda #0
+00090F  1  8D 30 0F             sta lost
+000912  1  A9 01                lda #1                  ; the ball sprite on
+000914  1  8D 03 D4             sta SPR+3
+000917  1  AD 06 D5             lda CLICKS              ; (forget older clicks)
+00091A  1  A9 65                lda #<s_click
+00091C  1  A2 0D                ldx #>s_click
+00091E  1  A0 1F                ldy #31
+000920  1  4C AC 0C             jmp message
+000923  1               
+000923  1               onpaddle:
+000923  1  AD 2E 0F             lda px                  ; on the middle of the paddle
+000926  1  18                   clc
+000927  1  69 09                adc #(PADW - BALLW) / 2
+000929  1  8D 27 0F             sta bx+1
+00092C  1  A9 B7                lda #PADY - BALLH
+00092E  1  8D 29 0F             sta by+1
+000931  1  A9 00                lda #0
+000933  1  8D 26 0F             sta bx
+000936  1  8D 28 0F             sta by
+000939  1  60                   rts
+00093A  1               
+00093A  1  A9 00        launch: lda #0
+00093C  1  8D 2F 0F             sta stuck
+00093F  1  20 D7 0C             jsr clearmsg
+000942  1  20 50 09             jsr speed               ; up, a little to the right
+000945  1  A9 80                lda #<128
+000947  1  8D 2A 0F             sta vx
+00094A  1  A9 00                lda #>128
+00094C  1  8D 2B 0F             sta vx+1
+00094F  1  60                   rts
+000950  1               
+000950  1               ; vy = -(1.25 + level / 4) pixels a frame (8.8), at most 3
+000950  1  AD 32 0F     speed:  lda level
+000953  1  0A                   asl
+000954  1  0A                   asl
+000955  1  0A                   asl
+000956  1  0A                   asl
+000957  1  0A                   asl
+000958  1  0A                   asl                     ; level * 64 = level / 4 in 8.8
+000959  1  18                   clc
+00095A  1  69 40                adc #<320
+00095C  1  8D 2C 0F             sta vy
+00095F  1  A9 01                lda #>320
+000961  1  69 00                adc #0
+000963  1  8D 2D 0F             sta vy+1
+000966  1  C9 03                cmp #3
+000968  1  90 0A                bcc @ok
+00096A  1  A9 00                lda #0
+00096C  1  8D 2C 0F             sta vy
+00096F  1  A9 03                lda #3
+000971  1  8D 2D 0F             sta vy+1
+000974  1  4C 30 0B     @ok:    jmp negvy               ; upwards
+000977  1               
+000977  1               ; --- paddle: follows the mouse ------------------------------------------------------------
+000977  1  AD 50 D5     paddle: lda MOUSEX
+00097A  1  38                   sec
+00097B  1  E9 0A                sbc #PADW / 2
+00097D  1  B0 02                bcs @a
+00097F  1  A9 00                lda #0
+000981  1  C9 04        @a:     cmp #LEFTW
+000983  1  B0 02                bcs @b
+000985  1  A9 04                lda #LEFTW
+000987  1  C9 89        @b:     cmp #RIGHTW - PADW + 1
+000989  1  90 02                bcc @c
+00098B  1  A9 88                lda #RIGHTW - PADW
+00098D  1  8D 2E 0F     @c:     sta px
+000990  1  18                   clc                     ; sprites 1 and 2 (16 + 4 pixels)
+000991  1  69 10                adc #16
+000993  1  8D 08 D4             sta SPR+8
+000996  1  69 10                adc #16
+000998  1  8D 10 D4             sta SPR+16
+00099B  1  A9 CA                lda #PADY + 16
+00099D  1  8D 09 D4             sta SPR+9
+0009A0  1  8D 11 D4             sta SPR+17
+0009A3  1  60                   rts
+0009A4  1               
+0009A4  1               ; The ball sprite at bx, by (the integer parts)
+0009A4  1               ballspr:
+0009A4  1  AD 27 0F             lda bx+1
+0009A7  1  18                   clc
+0009A8  1  69 10                adc #16
+0009AA  1  8D 00 D4             sta SPR
+0009AD  1  AD 29 0F             lda by+1
+0009B0  1  18                   clc
+0009B1  1  69 10                adc #16
+0009B3  1  8D 01 D4             sta SPR+1
+0009B6  1  60                   rts
+0009B7  1               
+0009B7  1               ; --- the ball moving: walls, paddle, bricks, out ----------------------------------------
+0009B7  1               moveball:
+0009B7  1  AD 26 0F             lda bx                  ; bx += vx
+0009BA  1  18                   clc
+0009BB  1  6D 2A 0F             adc vx
+0009BE  1  8D 26 0F             sta bx
+0009C1  1  AD 27 0F             lda bx+1
+0009C4  1  6D 2B 0F             adc vx+1
+0009C7  1  8D 27 0F             sta bx+1
+0009CA  1  AD 28 0F             lda by                  ; by += vy
+0009CD  1  18                   clc
+0009CE  1  6D 2C 0F             adc vy
+0009D1  1  8D 28 0F             sta by
+0009D4  1  AD 29 0F             lda by+1
+0009D7  1  6D 2D 0F             adc vy+1
+0009DA  1  8D 29 0F             sta by+1
+0009DD  1  AD 27 0F             lda bx+1                ; left wall
+0009E0  1  C9 04                cmp #LEFTW
+0009E2  1  B0 0B                bcs @r
+0009E4  1  A9 04                lda #LEFTW
+0009E6  1  8D 27 0F             sta bx+1
+0009E9  1  20 5D 0B             jsr posvx
+0009EC  1  20 78 0B             jsr tick
+0009EF  1  AD 27 0F     @r:     lda bx+1                ; right wall
+0009F2  1  C9 9B                cmp #RIGHTW - BALLW + 1
+0009F4  1  90 0B                bcc @t
+0009F6  1  A9 9A                lda #RIGHTW - BALLW
+0009F8  1  8D 27 0F             sta bx+1
+0009FB  1  20 54 0B             jsr negvx
+0009FE  1  20 78 0B             jsr tick
+000A01  1  AD 29 0F     @t:     lda by+1                ; top wall
+000A04  1  C9 0C                cmp #TOPW
+000A06  1  B0 0B                bcs @p
+000A08  1  A9 0C                lda #TOPW
+000A0A  1  8D 29 0F             sta by+1
+000A0D  1  20 39 0B             jsr posvy
+000A10  1  20 78 0B             jsr tick
+000A13  1  AD 2D 0F     @p:     lda vy+1                ; the paddle, if going down
+000A16  1  30 68                bmi @br
+000A18  1  AD 29 0F             lda by+1
+000A1B  1  18                   clc
+000A1C  1  69 03                adc #BALLH
+000A1E  1  C9 BA                cmp #PADY
+000A20  1  90 5E                bcc @br
+000A22  1  C9 BE                cmp #PADY + 4
+000A24  1  B0 48                bcs @out
+000A26  1  AD 27 0F             lda bx+1                ; ball's right > paddle's left
+000A29  1  18                   clc
+000A2A  1  69 02                adc #BALLW
+000A2C  1  CD 2E 0F             cmp px
+000A2F  1  90 3D                bcc @out
+000A31  1  F0 3B                beq @out
+000A33  1  AD 2E 0F             lda px                  ; paddle's right > ball's left
+000A36  1  18                   clc
+000A37  1  69 14                adc #PADW
+000A39  1  CD 27 0F             cmp bx+1
+000A3C  1  90 30                bcc @out
+000A3E  1  F0 2E                beq @out
+000A40  1  A9 B7                lda #PADY - BALLH       ; bounce: the angle from where it hit
+000A42  1  8D 29 0F             sta by+1
+000A45  1  20 30 0B             jsr negvy
+000A48  1  AD 27 0F             lda bx+1
+000A4B  1  18                   clc
+000A4C  1  69 02                adc #BALLW
+000A4E  1  38                   sec
+000A4F  1  ED 2E 0F             sbc px                  ; 1 .. 21
+000A52  1  4A                   lsr                     ; / 3 (about): 0 .. 7
+000A53  1  4A                   lsr
+000A54  1  C9 08                cmp #8
+000A56  1  90 02                bcc @i
+000A58  1  A9 07                lda #7
+000A5A  1  0A           @i:     asl
+000A5B  1  AA                   tax
+000A5C  1  BD 83 0A             lda angles,x
+000A5F  1  8D 2A 0F             sta vx
+000A62  1  BD 84 0A             lda angles+1,x
+000A65  1  8D 2B 0F             sta vx+1
+000A68  1  A9 3C                lda #60
+000A6A  1  20 83 0B             jsr sound2
+000A6D  1  60                   rts
+000A6E  1  AD 29 0F     @out:   lda by+1                ; fell below the screen?
+000A71  1  C9 C5                cmp #197
+000A73  1  90 0B                bcc @br
+000A75  1  A9 01                lda #1
+000A77  1  8D 30 0F             sta lost
+000A7A  1  A9 00                lda #0
+000A7C  1  8D 03 D4             sta SPR+3
+000A7F  1  60                   rts
+000A80  1  4C 94 0A     @br:    jmp bricks
+000A83  1  00 FE 80 FE  angles: .word $FE00, $FE80, $FF00, $FF80, 128, 256, 384, 512   ; -2 .. +2
+000A87  1  00 FF 80 FF  
+000A8B  1  80 00 00 01  
+000A93  1               
+000A93  1  60           brno:   rts
+000A94  1               
+000A94  1               ; A brick under the ball's centre? It goes, the ball bounces back
+000A94  1  AD 29 0F     bricks: lda by+1                ; row = (y + 1 - BRY) / 6, inside its 5
+000A97  1  18                   clc
+000A98  1  69 01                adc #1
+000A9A  1  38                   sec
+000A9B  1  E9 18                sbc #BRY
+000A9D  1  90 F4                bcc brno
+000A9F  1  A2 00                ldx #0
+000AA1  1  C9 06        @r:     cmp #6
+000AA3  1  90 09                bcc @rd
+000AA5  1  E9 06                sbc #6
+000AA7  1  E8                   inx
+000AA8  1  E0 06                cpx #BROWS
+000AAA  1  B0 E7                bcs brno
+000AAC  1  D0 F3                bne @r
+000AAE  1  C9 05        @rd:    cmp #5
+000AB0  1  B0 7D                bcs @no
+000AB2  1  8E 36 0F             stx row
+000AB5  1  AD 27 0F             lda bx+1                ; column = (x + 1 - BRX) / 12, inside its 11
+000AB8  1  18                   clc
+000AB9  1  69 01                adc #1
+000ABB  1  38                   sec
+000ABC  1  E9 08                sbc #BRX
+000ABE  1  90 6F                bcc @no
+000AC0  1  A2 00                ldx #0
+000AC2  1  C9 0C        @c:     cmp #12
+000AC4  1  90 09                bcc @cd
+000AC6  1  E9 0C                sbc #12
+000AC8  1  E8                   inx
+000AC9  1  E0 0C                cpx #COLS
+000ACB  1  B0 62                bcs @no
+000ACD  1  D0 F3                bne @c
+000ACF  1  C9 0B        @cd:    cmp #11
+000AD1  1  B0 5C                bcs @no
+000AD3  1  8E 37 0F             stx col
+000AD6  1  AD 36 0F             lda row                 ; index = row * 12 + column
+000AD9  1  0A                   asl
+000ADA  1  0A                   asl
+000ADB  1  8D 38 0F             sta tmp
+000ADE  1  0A                   asl
+000ADF  1  18                   clc
+000AE0  1  6D 38 0F             adc tmp
+000AE3  1  6D 37 0F             adc col
+000AE6  1  AA                   tax
+000AE7  1  BD 3C 0F             lda brick,x
+000AEA  1  F0 43                beq @no
+000AEC  1  A9 00                lda #0                  ; hit
+000AEE  1  9D 3C 0F             sta brick,x
+000AF1  1  CE 35 0F             dec left
+000AF4  1  20 F9 0B             jsr drawbrick           ; (colour 0: rubbed out)
+000AF7  1  AD 2D 0F             lda vy+1                ; back the other way
+000AFA  1  30 06                bmi @down
+000AFC  1  20 30 0B             jsr negvy
+000AFF  1  4C 05 0B             jmp @pts
+000B02  1  20 39 0B     @down:  jsr posvy
+000B05  1  A9 06        @pts:   lda #BROWS              ; points: 10 for the bottom row ... 60 at the top
+000B07  1  38                   sec
+000B08  1  ED 36 0F             sbc row
+000B0B  1  AA                   tax
+000B0C  1  A9 00                lda #0
+000B0E  1  18           @p:     clc
+000B0F  1  69 0A                adc #10
+000B11  1  CA                   dex
+000B12  1  D0 FA                bne @p
+000B14  1  18                   clc
+000B15  1  6D 33 0F             adc score
+000B18  1  8D 33 0F             sta score
+000B1B  1  90 03                bcc @s
+000B1D  1  EE 34 0F             inc score+1
+000B20  1  20 58 0C     @s:     jsr status
+000B23  1  A9 54                lda #84                 ; higher rows sound higher
+000B25  1  38                   sec
+000B26  1  ED 36 0F             sbc row
+000B29  1  ED 36 0F             sbc row
+000B2C  1  4C 7A 0B             jmp sound1
+000B2F  1  60           @no:    rts
+000B30  1               
+000B30  1  AD 2D 0F     negvy:  lda vy+1
+000B33  1  30 03                bmi @r
+000B35  1  4C 42 0B             jmp negy
+000B38  1  60           @r:     rts
+000B39  1  AD 2D 0F     posvy:  lda vy+1
+000B3C  1  10 03                bpl @r
+000B3E  1  4C 42 0B             jmp negy
+000B41  1  60           @r:     rts
+000B42  1  A9 00        negy:   lda #0
+000B44  1  38                   sec
+000B45  1  ED 2C 0F             sbc vy
+000B48  1  8D 2C 0F             sta vy
+000B4B  1  A9 00                lda #0
+000B4D  1  ED 2D 0F             sbc vy+1
+000B50  1  8D 2D 0F             sta vy+1
+000B53  1  60                   rts
+000B54  1  AD 2B 0F     negvx:  lda vx+1
+000B57  1  30 03                bmi @r
+000B59  1  4C 66 0B             jmp negx
+000B5C  1  60           @r:     rts
+000B5D  1  AD 2B 0F     posvx:  lda vx+1
+000B60  1  10 03                bpl @r
+000B62  1  4C 66 0B             jmp negx
+000B65  1  60           @r:     rts
+000B66  1  A9 00        negx:   lda #0
+000B68  1  38                   sec
+000B69  1  ED 2A 0F             sbc vx
+000B6C  1  8D 2A 0F             sta vx
+000B6F  1  A9 00                lda #0
+000B71  1  ED 2B 0F             sbc vx+1
+000B74  1  8D 2B 0F             sta vx+1
+000B77  1  60                   rts
+000B78  1               
+000B78  1               ; --- sound -----------------------------------------------------------------------------------
+000B78  1  A9 43        tick:   lda #67
+000B7A  1  A2 04        sound1: ldx #4                  ; a short note on voice 1
+000B7C  1  8E 33 D0     sound:  stx DUR
+000B7F  1  8D 30 D0             sta NOTE
+000B82  1  60                   rts
+000B83  1  A2 06        sound2: ldx #6                  ; on voice 2
+000B85  1  8E 37 D0             stx DUR2
+000B88  1  8D 34 D0             sta NOTE2
+000B8B  1  60                   rts
+000B8C  1               
+000B8C  1               ; --- drawing ---------------------------------------------------------------------------------
+000B8C  1               ; All the bricks alive
+000B8C  1               setbricks:
+000B8C  1  A2 47                ldx #NBRICKS - 1
+000B8E  1  A9 01                lda #1
+000B90  1  9D 3C 0F     @b:     sta brick,x
+000B93  1  CA                   dex
+000B94  1  10 FA                bpl @b
+000B96  1  A9 48                lda #NBRICKS
+000B98  1  8D 35 0F             sta left
+000B9B  1  60                   rts
+000B9C  1               
+000B9C  1               drawfield:
+000B9C  1  A9 00                lda #0                  ; black
+000B9E  1  8D 14 D3             sta BCOL
+000BA1  1  A9 01                lda #C_CLEAR
+000BA3  1  8D 18 D3             sta BCMD
+000BA6  1  A9 08                lda #8                  ; dark grey walls
+000BA8  1  8D 14 D3             sta BCOL
+000BAB  1  A9 00                lda #0
+000BAD  1  8D 10 D3             sta BX0
+000BB0  1  8D 12 D3             sta BX1
+000BB3  1  A9 03                lda #LEFTW - 1
+000BB5  1  8D 12 D3             sta BX1
+000BB8  1  A9 08                lda #8
+000BBA  1  8D 11 D3             sta BY0
+000BBD  1  A9 C7                lda #199
+000BBF  1  8D 13 D3             sta BY1
+000BC2  1  A9 05                lda #C_BOXF
+000BC4  1  8D 18 D3             sta BCMD
+000BC7  1  A9 9C                lda #RIGHTW
+000BC9  1  8D 10 D3             sta BX0
+000BCC  1  A9 9F                lda #159
+000BCE  1  8D 12 D3             sta BX1
+000BD1  1  A9 05                lda #C_BOXF
+000BD3  1  8D 18 D3             sta BCMD
+000BD6  1  A9 00                lda #0
+000BD8  1  8D 10 D3             sta BX0
+000BDB  1  A9 0B                lda #TOPW - 1
+000BDD  1  8D 13 D3             sta BY1
+000BE0  1  A9 05                lda #C_BOXF
+000BE2  1  8D 18 D3             sta BCMD
+000BE5  1  A2 47                ldx #NBRICKS - 1        ; the bricks
+000BE7  1  8E 39 0F     @b:     stx tmp2
+000BEA  1  BD 3C 0F             lda brick,x
+000BED  1  F0 03                beq @n
+000BEF  1  20 F9 0B             jsr drawbrick
+000BF2  1  AE 39 0F     @n:     ldx tmp2
+000BF5  1  CA                   dex
+000BF6  1  10 EF                bpl @b
+000BF8  1  60                   rts
+000BF9  1               
+000BF9  1               ; Brick X in its row's colour (or rubbed out if it is gone)
+000BF9  1               drawbrick:
+000BF9  1  8A                   txa                     ; row = X / 12, column = X mod 12
+000BFA  1  A0 00                ldy #0
+000BFC  1  C9 0C        @d:     cmp #COLS
+000BFE  1  90 05                bcc @dd
+000C00  1  E9 0C                sbc #COLS
+000C02  1  C8                   iny
+000C03  1  D0 F7                bne @d
+000C05  1  8D 37 0F     @dd:    sta col
+000C08  1  8C 36 0F             sty row
+000C0B  1  AD 37 0F             lda col                 ; x = BRX + column * 12
+000C0E  1  0A                   asl
+000C0F  1  0A                   asl
+000C10  1  8D 38 0F             sta tmp
+000C13  1  0A                   asl
+000C14  1  18                   clc
+000C15  1  6D 38 0F             adc tmp
+000C18  1  69 08                adc #BRX
+000C1A  1  8D 10 D3             sta BX0
+000C1D  1  18                   clc
+000C1E  1  69 0A                adc #10
+000C20  1  8D 12 D3             sta BX1
+000C23  1  AD 36 0F             lda row                 ; y = BRY + row * 6
+000C26  1  0A                   asl
+000C27  1  8D 38 0F             sta tmp
+000C2A  1  0A                   asl
+000C2B  1  18                   clc
+000C2C  1  6D 38 0F             adc tmp
+000C2F  1  69 18                adc #BRY
+000C31  1  8D 11 D3             sta BY0
+000C34  1  18                   clc
+000C35  1  69 04                adc #4
+000C37  1  8D 13 D3             sta BY1
+000C3A  1  BD 3C 0F             lda brick,x
+000C3D  1  F0 08                beq @off
+000C3F  1  AC 36 0F             ldy row
+000C42  1  B9 52 0C             lda rowcol,y
+000C45  1  D0 02                bne @set
+000C47  1  A9 00        @off:   lda #0
+000C49  1  8D 14 D3     @set:   sta BCOL
+000C4C  1  A9 05                lda #C_BOXF
+000C4E  1  8D 18 D3             sta BCMD
+000C51  1  60                   rts
+000C52  1  0C 17 0E 0A  rowcol: .byte 12, 23, 14, 10, 9, 13     ; red, orange, yellow, green, blue, magenta
+000C56  1  09 0D        
+000C58  1               
+000C58  1               ; --- the text layer: the top line, messages -------------------------------------------
+000C58  1  A9 1F        status: lda #$1F                ; white on blue
+000C5A  1  8D 21 D0             sta COLOR
+000C5D  1  A9 00                lda #0
+000C5F  1  8D 16 D0             sta CURY
+000C62  1  8D 15 D0             sta CURX
+000C65  1  A2 00                ldx #0
+000C67  1  BD 15 0D     @s:     lda s_status,x
+000C6A  1  F0 06                beq @n
+000C6C  1  8D 12 D0             sta DSP
+000C6F  1  E8                   inx
+000C70  1  D0 F5                bne @s
+000C72  1  A9 06        @n:     lda #6                  ; the score
+000C74  1  8D 15 D0             sta CURX
+000C77  1  AD 33 0F             lda score
+000C7A  1  8D 3A 0F             sta num
+000C7D  1  AD 34 0F             lda score+1
+000C80  1  8D 3B 0F             sta num+1
+000C83  1  20 E0 0C             jsr dec5
+000C86  1  A9 14                lda #20                 ; lives
+000C88  1  8D 15 D0             sta CURX
+000C8B  1  AD 31 0F             lda lives
+000C8E  1  09 30                ora #'0'
+000C90  1  8D 12 D0             sta DSP
+000C93  1  A9 1E                lda #30                 ; level
+000C95  1  8D 15 D0             sta CURX
+000C98  1  AD 32 0F             lda level
+000C9B  1  8D 3A 0F             sta num
+000C9E  1  A9 00                lda #0
+000CA0  1  8D 3B 0F             sta num+1
+000CA3  1  20 E0 0C             jsr dec5
+000CA6  1  A9 4F                lda #79                 ; the cursor out of the way
+000CA8  1  8D 15 D0             sta CURX
+000CAB  1  60                   rts
+000CAC  1               
+000CAC  1               ; A message (XA) on text row 13 at column Y, yellow on see-through
+000CAC  1               message:
+000CAC  1  8D C2 0C             sta mptr+1
+000CAF  1  8E C3 0C             stx mptr+2
+000CB2  1  8C 15 D0             sty CURX
+000CB5  1  A9 0D                lda #13
+000CB7  1  8D 16 D0             sta CURY
+000CBA  1  A9 0E                lda #$0E
+000CBC  1  8D 21 D0             sta COLOR
+000CBF  1  A2 00                ldx #0
+000CC1  1  BD FF FF     mptr:   lda $FFFF,x             ; (self-modified: no zero page)
+000CC4  1  F0 06                beq @e
+000CC6  1  8D 12 D0             sta DSP
+000CC9  1  E8                   inx
+000CCA  1  D0 F5                bne mptr
+000CCC  1  A9 00        @e:     lda #0
+000CCE  1  8D 16 D0             sta CURY
+000CD1  1  A9 4F                lda #79
+000CD3  1  8D 15 D0             sta CURX
+000CD6  1  60                   rts
+000CD7  1               
+000CD7  1               clearmsg:
+000CD7  1  A9 99                lda #<s_blank
+000CD9  1  A2 0D                ldx #>s_blank
+000CDB  1  A0 14                ldy #20
+000CDD  1  4C AC 0C             jmp message
+000CE0  1               
+000CE0  1               ; num as 5 digits
+000CE0  1  A0 00        dec5:   ldy #0
+000CE2  1  A2 30        @d:     ldx #'0'
+000CE4  1  AD 3A 0F     @s:     lda num
+000CE7  1  38                   sec
+000CE8  1  F9 0B 0D             sbc p10l,y
+000CEB  1  8D 38 0F             sta tmp
+000CEE  1  AD 3B 0F             lda num+1
+000CF1  1  F9 10 0D             sbc p10h,y
+000CF4  1  90 0C                bcc @o
+000CF6  1  8D 3B 0F             sta num+1
+000CF9  1  AD 38 0F             lda tmp
+000CFC  1  8D 3A 0F             sta num
+000CFF  1  E8                   inx
+000D00  1  D0 E2                bne @s
+000D02  1  8E 12 D0     @o:     stx DSP
+000D05  1  C8                   iny
+000D06  1  C0 05                cpy #5
+000D08  1  D0 D8                bne @d
+000D0A  1  60                   rts
+000D0B  1  10 E8 64 0A  p10l:   .byte <10000, <1000, <100, <10, <1
+000D0F  1  01           
+000D10  1  27 03 00 00  p10h:   .byte >10000, >1000, >100, >10, >1
+000D14  1  00           
+000D15  1               
+000D15  1  53 43 4F 52  s_status: .byte "SCORE 00000   LIVES 0   LEVEL 00000   MOUSE: PADDLE  CLICK: LAUNCH  ESC: QUIT  ", 0   ; 79 characters: no wrap
+000D19  1  45 20 30 30  
+000D1D  1  30 30 30 20  
+000D65  1  43 4C 49 43  s_click:  .byte "CLICK TO LAUNCH", 0
+000D69  1  4B 20 54 4F  
+000D6D  1  20 4C 41 55  
+000D75  1  47 41 4D 45  s_over:   .byte "GAME OVER - CLICK: AGAIN  ESC: QUIT", 0
+000D79  1  20 4F 56 45  
+000D7D  1  52 20 2D 20  
+000D99  1  20 20 20 20  s_blank:  .byte "                                        ", 0
+000D9D  1  20 20 20 20  
+000DA1  1  20 20 20 20  
+000DC2  1               
+000DC2  1               ; --- sprite images 0-2: ball, paddle (16 + 4 pixels) ----------------------------------
+000DC2  1  A9 00        images: lda #0                  ; port A -> $FD0000 (image 0)
+000DC4  1  8D 00 D2             sta PADR
+000DC7  1  8D 01 D2             sta PADR+1
+000DCA  1  A9 FD                lda #$FD
+000DCC  1  8D 02 D2             sta PADR+2
+000DCF  1  A9 01                lda #1
+000DD1  1  8D 04 D2             sta PSTEP
+000DD4  1  A2 00                ldx #0                  ; 3 images, 256 bytes each
+000DD6  1  A9 80        @i:     lda #$80                ; see-through by default
+000DD8  1  BC 25 0E             ldy imgpix,x            ; ... except where the shape table says
+000DDB  1  C0 FF                cpy #$FF
+000DDD  1  F0 03                beq @put
+000DDF  1  BD 25 0E             lda imgpix,x
+000DE2  1  8D 03 D2     @put:   sta PDATA
+000DE5  1  E8                   inx
+000DE6  1  D0 EE                bne @i
+000DE8  1  20 EE 0D             jsr @img1
+000DEB  1  4C 05 0E             jmp @img2
+000DEE  1  A2 00        @img1:  ldx #0                  ; paddle left: 16 x 3 (light cyan, white top)
+000DF0  1  A9 80        @p:     lda #$80
+000DF2  1  E0 30                cpx #48
+000DF4  1  B0 08                bcs @pp
+000DF6  1  A9 0B                lda #11
+000DF8  1  E0 10                cpx #16
+000DFA  1  B0 02                bcs @pp
+000DFC  1  A9 0F                lda #15
+000DFE  1  8D 03 D2     @pp:    sta PDATA
+000E01  1  E8                   inx
+000E02  1  D0 EC                bne @p
+000E04  1  60                   rts
+000E05  1  A2 00        @img2:  ldx #0                  ; paddle right: 4 x 3
+000E07  1  A9 80        @q:     lda #$80
+000E09  1  E0 30                cpx #48
+000E0B  1  B0 11                bcs @qq
+000E0D  1  8A                   txa
+000E0E  1  29 0F                and #15
+000E10  1  C9 04                cmp #4
+000E12  1  A9 80                lda #$80
+000E14  1  B0 08                bcs @qq
+000E16  1  A9 0B                lda #11
+000E18  1  E0 10                cpx #16
+000E1A  1  B0 02                bcs @qq
+000E1C  1  A9 0F                lda #15
+000E1E  1  8D 03 D2     @qq:    sta PDATA
+000E21  1  E8                   inx
+000E22  1  D0 E3                bne @q
+000E24  1  60                   rts
+000E25  1               ; image 0: the ball, 2 x 3 in white ($FF = see-through)
+000E25  1  0F 0F FF FF  imgpix: .byte 15, 15, $FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+000E29  1  FF FF FF FF  
+000E2D  1  FF FF FF FF  
+000E35  1  0F 0F FF FF          .byte 15, 15, $FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+000E39  1  FF FF FF FF  
+000E3D  1  FF FF FF FF  
+000E45  1  0F 0F FF FF          .byte 15, 15, $FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+000E49  1  FF FF FF FF  
+000E4D  1  FF FF FF FF  
+000E55  1  FF FF FF FF          .res 256 - 48, $FF
+000E59  1  FF FF FF FF  
+000E5D  1  FF FF FF FF  
+000F25  1               
+000F25  1               ; --- variables -----------------------------------------------------------------------------
+000F25  1  xx           savesp: .res 1
+000F26  1  xx xx        bx:     .res 2          ; ball position, 8.8 (fraction, pixel)
+000F28  1  xx xx        by:     .res 2
+000F2A  1  xx xx        vx:     .res 2          ; its speed, 8.8 signed
+000F2C  1  xx xx        vy:     .res 2
+000F2E  1  xx           px:     .res 1          ; paddle's left edge
+000F2F  1  xx           stuck:  .res 1          ; 1: the ball waits on the paddle
+000F30  1  xx           lost:   .res 1
+000F31  1  xx           lives:  .res 1
+000F32  1  xx           level:  .res 1
+000F33  1  xx xx        score:  .res 2
+000F35  1  xx           left:   .res 1          ; bricks left
+000F36  1  xx           row:    .res 1
+000F37  1  xx           col:    .res 1
+000F38  1  xx           tmp:    .res 1
+000F39  1  xx           tmp2:   .res 1
+000F3A  1  xx xx        num:    .res 2
+000F3C  1  xx xx xx xx  brick:  .res NBRICKS
+000F40  1  xx xx xx xx  
+000F44  1  xx xx xx xx  
+000F3C  1               

@@ -1,0 +1,133 @@
+ca65 V2.19 - Git 52727a5
+Main file   : irqtune.asm
+Current file: irqtune.asm
+
+000000r 1               ; irqtune.asm - background music on the frame interrupt       (bank RAM $E000)
+000000r 1               ; Public domain. A short original tune on the three music voices, with drums
+000000r 1               ; on the noise voice, played by an interrupt handler 60 times a second, so it
+000000r 1               ; keeps going while BASIC or the monitor runs. Everything (code, variables)
+000000r 1               ; is in this bank: no zero page, nothing in the fixed RAM.
+000000r 1               ;
+000000r 1               ;   $E000  start (or restart) the tune      $E003  stop it
+000000r 1               ; From the monitor: L IRQTUNE E000 05 / D020: 05 / E000R
+000000r 1               ; From BASIC:       POKE $D020,5:CALL $E000   (stop: POKE $D020,5:CALL $E003)
+000000r 1               ; Any bank works: the handler runs in the bank that was selected at start.
+000000r 1               
+000000r 1               BANK    = $D020
+000000r 1               IRQEN   = $D007         ; 1 = the FRAME interrupt
+000000r 1               IRQBANK = $D009
+000000r 1               IRQVEC  = $D00A
+000000r 1               V1      = $D030         ; voices: NOTE, VOL, WAVE, DUR
+000000r 1               V2      = $D034
+000000r 1               V3      = $D038
+000000r 1               V4      = $D03C         ; the noise voice
+000000r 1               S1      = $D050         ; shaping: DECAY, SWEEP, PULSE
+000000r 1               S4      = $D05C
+000000r 1               SPEED   = 7             ; frames per step
+000000r 1               
+000000r 1  4C rr rr             jmp start
+000003r 1  4C rr rr             jmp stop
+000006r 1               
+000006r 1  78           start:  sei                     ; (nothing may fire half set up)
+000007r 1  A9 rr                lda #<handler
+000009r 1  8D 0A D0             sta IRQVEC
+00000Cr 1  A9 rr                lda #>handler
+00000Er 1  8D 0B D0             sta IRQVEC+1
+000011r 1  AD 20 D0             lda BANK                ; the handler runs in this bank
+000014r 1  8D 09 D0             sta IRQBANK
+000017r 1  A2 0F                ldx #15                 ; the voices' settings
+000019r 1  BD rr rr     @v:     lda vset,x
+00001Cr 1  9D 30 D0             sta V1,x
+00001Fr 1  CA                   dex
+000020r 1  10 F7                bpl @v
+000022r 1  A9 06                lda #6                  ; a thin square for the melody
+000024r 1  8D 52 D0             sta S1+2
+000027r 1  A9 01                lda #1
+000029r 1  8D rr rr             sta TICK
+00002Cr 1  A9 00                lda #0
+00002Er 1  8D rr rr             sta STEP
+000031r 1  A9 01                lda #1                  ; the frame interrupt on
+000033r 1  8D 07 D0             sta IRQEN
+000036r 1  58                   cli
+000037r 1  60                   rts
+000038r 1               
+000038r 1  A9 00        stop:   lda #0
+00003Ar 1  8D 07 D0             sta IRQEN
+00003Dr 1  8D 30 D0             sta V1                  ; all notes off
+000040r 1  8D 34 D0             sta V2
+000043r 1  8D 38 D0             sta V3
+000046r 1  8D 3C D0             sta V4
+000049r 1  60                   rts
+00004Ar 1               
+00004Ar 1               ; Called by the monitor's IRQ code with A = the sources that fired
+00004Ar 1               handler:
+00004Ar 1  29 01                and #1                  ; FRAME?
+00004Cr 1  F0 46                beq @done
+00004Er 1  CE rr rr             dec TICK
+000051r 1  D0 41                bne @done
+000053r 1  A9 07                lda #SPEED
+000055r 1  8D rr rr             sta TICK
+000058r 1  AE rr rr             ldx STEP
+00005Br 1  BD rr rr             lda melody,x
+00005Er 1  F0 03                beq @m
+000060r 1  8D 30 D0             sta V1
+000063r 1  BD rr rr     @m:     lda bass,x
+000066r 1  F0 03                beq @b
+000068r 1  8D 34 D0             sta V2
+00006Br 1  BD rr rr     @b:     lda arp,x
+00006Er 1  8D 38 D0             sta V3
+000071r 1  BC rr rr             ldy drums,x
+000074r 1  F0 17                beq @d
+000076r 1  B9 rr rr             lda dvol-1,y            ; VOL, WAVE, DECAY then NOTE (which starts it)
+000079r 1  8D 3D D0             sta V4+1
+00007Cr 1  B9 rr rr             lda dwave-1,y
+00007Fr 1  8D 3E D0             sta V4+2
+000082r 1  A9 01                lda #1
+000084r 1  8D 5C D0             sta S4
+000087r 1  B9 rr rr             lda dnote-1,y
+00008Ar 1  8D 3C D0             sta V4
+00008Dr 1  E8           @d:     inx
+00008Er 1  8A                   txa
+00008Fr 1  29 1F                and #31
+000091r 1  8D rr rr             sta STEP
+000094r 1  60           @done:  rts
+000095r 1               
+000095r 1  00           TICK:   .byte 0
+000096r 1  00           STEP:   .byte 0
+000097r 1               
+000097r 1               ;          NOTE VOL WAVE DUR
+000097r 1  00 09 00 06  vset:   .byte 0, 9, 0, 6        ; melody: square
+00009Br 1  00 0F 01 05          .byte 0, 15, 1, 5       ; bass: triangle
+00009Fr 1  00 04 02 03          .byte 0, 4, 2, 3        ; arpeggio: sawtooth, quiet
+0000A3r 1  00 0C 00 00          .byte 0, 12, 0, 0       ; drums: noise, ended by DECAY
+0000A7r 1               
+0000A7r 1               ; 32 steps; 0 = nothing new
+0000A7r 1  48 00 4B 00  melody: .byte 72,0,75,0,79,0,77,75, 74,0,72,0,74,75,77,0
+0000ABr 1  4F 00 4D 4B  
+0000AFr 1  4A 00 48 00  
+0000B7r 1  4F 00 50 4F          .byte 79,0,80,79,77,0,75,0, 74,72,74,0,72,0,0,0
+0000BBr 1  4D 00 4B 00  
+0000BFr 1  4A 48 4A 00  
+0000C7r 1  24 00 30 00  bass:   .byte 36,0,48,0,36,0,48,0, 41,0,53,0,41,0,53,0
+0000CBr 1  24 00 30 00  
+0000CFr 1  29 00 35 00  
+0000D7r 1  2C 00 38 00          .byte 44,0,56,0,44,0,56,0, 43,0,55,0,43,0,47,0
+0000DBr 1  2C 00 38 00  
+0000DFr 1  2B 00 37 00  
+0000E7r 1  3C 3F 43 3C  arp:    .byte 60,63,67,60,63,67,60,63, 60,65,68,60,65,68,60,65
+0000EBr 1  3F 43 3C 3F  
+0000EFr 1  3C 41 44 3C  
+0000F7r 1  3F 44 48 3F          .byte 63,68,72,63,68,72,63,68, 62,67,71,62,67,71,62,67
+0000FBr 1  44 48 3F 44  
+0000FFr 1  3E 43 47 3E  
+000107r 1  01 00 03 00  drums:  .byte 1,0,3,0,2,0,3,0, 1,0,3,1,2,0,3,3
+00010Br 1  02 00 03 00  
+00010Fr 1  01 00 03 01  
+000117r 1  01 00 03 00          .byte 1,0,3,0,2,0,3,0, 1,0,3,1,2,2,3,2
+00011Br 1  02 00 03 00  
+00011Fr 1  01 00 03 01  
+000127r 1               ;              kick snare hat
+000127r 1  28 5C 7C     dnote:  .byte 40, 92, 124
+00012Ar 1  0F 0B 05     dvol:   .byte 15, 11, 5
+00012Dr 1  00 00 01     dwave:  .byte 0, 0, 1
+00012Fr 1               

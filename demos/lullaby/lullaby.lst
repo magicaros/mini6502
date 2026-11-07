@@ -1,0 +1,408 @@
+ca65 V2.19 - Git 52727a5
+Main file   : lullaby.asm
+Current file: lullaby.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; lullaby.asm - mini6502 sound demo                         (bank RAM $E000-$EFFF)
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain. Plays Brahms' Lullaby (Wiegenlied, Op. 49 No. 4, 1868; the
+000000r 1               ; melody is in the public domain) on the three sound voices, with a little
+000000r 1               ; display of what each voice is playing. Any key stops it.
+000000r 1               ;
+000000r 1               ;   L LULLABY E000 02     load into bank 2 (any bank works)
+000000r 1               ;   D020: 02              select it
+000000r 1               ;   E000R                 play; a key stops and returns to the monitor
+000000r 1               ;
+000000r 1               ; Voice 1 melody (triangle), voice 2 bass (triangle), voice 3 harmony
+000000r 1               ; (sawtooth, quiet). Timing comes from the FRAME counter ($D001), so the
+000000r 1               ; tempo stays the same whatever CPU_HZ is. The song (song.inc) is made by
+000000r 1               ; song.py: three streams of (note, length in eighths, DUR) events.
+000000r 1               ;
+000000r 1               ; Uses $E2-$E3 of the zero page (free unless a far call is in progress) and
+000000r 1               ; $02A0-$02BF; RAM, BASIC and the monitor are left alone.
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1               SYSCTL  = $D000
+000000r 1               FRAME   = $D001
+000000r 1               KBD     = $D010
+000000r 1               KBDCR   = $D011
+000000r 1               DSP     = $D012
+000000r 1               CURX    = $D015
+000000r 1               CURY    = $D016
+000000r 1               VCHR    = $D017
+000000r 1               VCOL    = $D018
+000000r 1               COLOR   = $D021
+000000r 1               V1      = $D030         ; voice n at V1 + 4*n: NOTE, VOL, WAVE, DUR
+000000r 1               
+000000r 1               P       = $E2           ; 2: stream pointer
+000000r 1               IDX     = $02A0         ; 3: position in each stream
+000000r 1               CNT     = $02A3         ; 3: ticks left of each voice's current event
+000000r 1               OLDX    = $02A6         ; 3: column of each voice's marker on screen
+000000r 1               LASTF   = $02A9         ; FRAME seen last
+000000r 1               WAITN   = $02AA         ; frames left in this tick
+000000r 1               SAVCOL  = $02AB         ; COLOR on entry
+000000r 1               VOFF    = $02AC         ; voice * 4
+000000r 1               NOTE    = $02AD
+000000r 1               
+000000r 1               ROW0    = 12            ; screen row of voice 1's track (then +3, +6)
+000000r 1               COL0    = 30            ; marker column = note - COL0
+000000r 1               
+000000r 1                       .org $E000
+00E000  1               
+00E000  1  4C 03 E0             jmp play                ; $E000
+00E003  1               
+00E003  1               play:
+00E003  1  D8                   cld
+00E004  1  AD 21 D0             lda COLOR
+00E007  1  8D AB 02             sta SAVCOL
+00E00A  1  A9 01                lda #$01                ; dark blue background, for the night
+00E00C  1  8D 21 D0             sta COLOR
+00E00F  1  A9 02                lda #2
+00E011  1  8D 00 D0             sta SYSCTL              ; clear the screen (in that colour)
+00E014  1  20 05 E1             jsr title
+00E017  1               
+00E017  1  A2 02                ldx #2                  ; set up the voices and the streams
+00E019  1  8A           @init:  txa
+00E01A  1  0A                   asl
+00E01B  1  0A                   asl
+00E01C  1  A8                   tay
+00E01D  1  BD 53 E2             lda vols,x
+00E020  1  99 31 D0             sta V1+1,y
+00E023  1  BD 56 E2             lda waves,x
+00E026  1  99 32 D0             sta V1+2,y
+00E029  1  A9 00                lda #0
+00E02B  1  9D A0 02             sta IDX,x
+00E02E  1  9D A6 02             sta OLDX,x
+00E031  1  A9 01                lda #1                  ; fetch an event on the first tick
+00E033  1  9D A3 02             sta CNT,x
+00E036  1  CA                   dex
+00E037  1  10 E0                bpl @init
+00E039  1  AD 01 D0             lda FRAME
+00E03C  1  8D A9 02             sta LASTF
+00E03F  1               
+00E03F  1               ; --- one tick (an eighth note) ---------------------------------------------------
+00E03F  1               tick:
+00E03F  1  A2 00                ldx #0
+00E041  1  DE A3 02     @voice: dec CNT,x
+00E044  1  D0 03                bne @next
+00E046  1  20 88 E0             jsr fetch               ; this voice's event is over: start the next
+00E049  1  E8           @next:  inx
+00E04A  1  E0 03                cpx #3
+00E04C  1  90 F3                bcc @voice
+00E04E  1               
+00E04E  1  A9 12                lda #TICK               ; wait TICK frames, watching the keyboard
+00E050  1  8D AA 02             sta WAITN
+00E053  1  AD 11 D0     @wait:  lda KBDCR
+00E056  1  30 13                bmi stop
+00E058  1  AD 01 D0             lda FRAME
+00E05B  1  CD A9 02             cmp LASTF
+00E05E  1  F0 F3                beq @wait
+00E060  1  8D A9 02             sta LASTF
+00E063  1  CE AA 02             dec WAITN
+00E066  1  D0 EB                bne @wait
+00E068  1  4C 3F E0             jmp tick
+00E06B  1               
+00E06B  1               ; --- a key: silence, back to the monitor ---------------------------------------
+00E06B  1               stop:
+00E06B  1  AD 10 D0             lda KBD                 ; take the key
+00E06E  1  A2 02                ldx #2
+00E070  1  8A           @off:   txa
+00E071  1  0A                   asl
+00E072  1  0A                   asl
+00E073  1  A8                   tay
+00E074  1  A9 00                lda #0                  ; release: the notes fade out
+00E076  1  99 30 D0             sta V1,y
+00E079  1  CA                   dex
+00E07A  1  10 F4                bpl @off
+00E07C  1  AD AB 02             lda SAVCOL
+00E07F  1  8D 21 D0             sta COLOR
+00E082  1  A9 02                lda #2
+00E084  1  8D 00 D0             sta SYSCTL
+00E087  1  60                   rts                     ; R ran us with JSR: back to the prompt
+00E088  1               
+00E088  1               ; --- next event of voice X ---------------------------------------------------------
+00E088  1               fetch:
+00E088  1  BD 4D E2             lda slo,x
+00E08B  1  85 E2                sta P
+00E08D  1  BD 50 E2             lda shi,x
+00E090  1  85 E3                sta P+1
+00E092  1  BC A0 02             ldy IDX,x
+00E095  1  B1 E2                lda (P),y
+00E097  1  C9 FF                cmp #$FF                ; end of the song: from the top
+00E099  1  D0 08                bne @event
+00E09B  1  A9 00                lda #0
+00E09D  1  9D A0 02             sta IDX,x
+00E0A0  1  A8                   tay
+00E0A1  1  B1 E2                lda (P),y
+00E0A3  1  8D AD 02     @event: sta NOTE
+00E0A6  1  C8                   iny
+00E0A7  1  B1 E2                lda (P),y               ; length in ticks
+00E0A9  1  9D A3 02             sta CNT,x
+00E0AC  1  C8                   iny
+00E0AD  1  8A                   txa
+00E0AE  1  0A                   asl
+00E0AF  1  0A                   asl
+00E0B0  1  8D AC 02             sta VOFF
+00E0B3  1  B1 E2                lda (P),y               ; DUR in frames
+00E0B5  1  48                   pha
+00E0B6  1  C8                   iny
+00E0B7  1  98                   tya
+00E0B8  1  9D A0 02             sta IDX,x
+00E0BB  1  68                   pla
+00E0BC  1  AC AC 02             ldy VOFF
+00E0BF  1  99 33 D0             sta V1+3,y              ; DUR first: the NOTE write uses it
+00E0C2  1  AD AD 02             lda NOTE
+00E0C5  1  F0 03                beq @rest
+00E0C7  1  99 30 D0             sta V1,y                ; play it
+00E0CA  1               @rest:  ; fall into the display
+00E0CA  1               
+00E0CA  1               ; Moves voice X's marker to its note's column (or hides it for a rest)
+00E0CA  1               marker:
+00E0CA  1  8A                   txa                     ; row = ROW0 + 3*X
+00E0CB  1  8D AC 02             sta VOFF
+00E0CE  1  0A                   asl
+00E0CF  1  6D AC 02             adc VOFF
+00E0D2  1  69 0C                adc #ROW0
+00E0D4  1  8D 16 D0             sta CURY
+00E0D7  1  BD A6 02             lda OLDX,x              ; erase the old marker
+00E0DA  1  F0 08                beq @new
+00E0DC  1  8D 15 D0             sta CURX
+00E0DF  1  A9 20                lda #' '
+00E0E1  1  8D 17 D0             sta VCHR
+00E0E4  1  AD AD 02     @new:   lda NOTE
+00E0E7  1  F0 16                beq @hide
+00E0E9  1  38                   sec
+00E0EA  1  E9 1E                sbc #COL0
+00E0EC  1  9D A6 02             sta OLDX,x
+00E0EF  1  8D 15 D0             sta CURX
+00E0F2  1  BD 59 E2             lda glyphs,x
+00E0F5  1  8D 17 D0             sta VCHR
+00E0F8  1  BD 5C E2             lda colors,x
+00E0FB  1  8D 18 D0             sta VCOL
+00E0FE  1  60                   rts
+00E0FF  1  A9 00        @hide:  lda #0
+00E101  1  9D A6 02             sta OLDX,x
+00E104  1  60                   rts
+00E105  1               
+00E105  1               ; --- title screen ------------------------------------------------------------------
+00E105  1               title:
+00E105  1  A9 0F                lda #$0F                ; white on blue
+00E107  1  8D 21 D0             sta COLOR
+00E10A  1  A2 85                ldx #<t1
+00E10C  1  A0 E1                ldy #>t1
+00E10E  1  A9 02                lda #2
+00E110  1  20 6C E1             jsr at
+00E113  1  A9 0B                lda #$0B                ; light cyan
+00E115  1  8D 21 D0             sta COLOR
+00E118  1  A2 99                ldx #<t2
+00E11A  1  A0 E1                ldy #>t2
+00E11C  1  A9 04                lda #4
+00E11E  1  20 6C E1             jsr at
+00E121  1  A9 07                lda #$07
+00E123  1  8D 21 D0             sta COLOR
+00E126  1  A2 BC                ldx #<t3
+00E128  1  A0 E1                ldy #>t3
+00E12A  1  A9 05                lda #5
+00E12C  1  20 6C E1             jsr at
+00E12F  1  A2 E2                ldx #<t4
+00E131  1  A0 E1                ldy #>t4
+00E133  1  A9 08                lda #8
+00E135  1  20 6C E1             jsr at
+00E138  1  A9 0E                lda #$0E                ; labels in yellow
+00E13A  1  8D 21 D0             sta COLOR
+00E13D  1  A2 23                ldx #<l1
+00E13F  1  A0 E2                ldy #>l1
+00E141  1  A9 0C                lda #ROW0
+00E143  1  20 6C E1             jsr at
+00E146  1  A2 2A                ldx #<l2
+00E148  1  A0 E2                ldy #>l2
+00E14A  1  A9 0F                lda #ROW0+3
+00E14C  1  20 6C E1             jsr at
+00E14F  1  A2 2F                ldx #<l3
+00E151  1  A0 E2                ldy #>l3
+00E153  1  A9 12                lda #ROW0+6
+00E155  1  20 6C E1             jsr at
+00E158  1  A9 09                lda #$09                ; light blue
+00E15A  1  8D 21 D0             sta COLOR
+00E15D  1  A2 37                ldx #<t5
+00E15F  1  A0 E2                ldy #>t5
+00E161  1  A9 16                lda #22
+00E163  1  20 6C E1             jsr at
+00E166  1  A9 07                lda #$07
+00E168  1  8D 21 D0             sta COLOR
+00E16B  1  60                   rts
+00E16C  1               
+00E16C  1               ; Prints the zero-terminated string at YX on row A, column 2
+00E16C  1               at:
+00E16C  1  8D 16 D0             sta CURY
+00E16F  1  A9 02                lda #2
+00E171  1  8D 15 D0             sta CURX
+00E174  1  86 E2                stx P
+00E176  1  84 E3                sty P+1
+00E178  1  A0 00                ldy #0
+00E17A  1  B1 E2        @loop:  lda (P),y
+00E17C  1  F0 06                beq @done
+00E17E  1  8D 12 D0             sta DSP
+00E181  1  C8                   iny
+00E182  1  D0 F6                bne @loop
+00E184  1  60           @done:  rts
+00E185  1               
+00E185  1  6D 69 6E 69  t1:     .byte "mini6502 sound demo", 0
+00E189  1  36 35 30 32  
+00E18D  1  20 73 6F 75  
+00E199  1  4C 75 6C 6C  t2:     .byte "Lullaby (Wiegenlied), Op. 49 No. 4", 0
+00E19D  1  61 62 79 20  
+00E1A1  1  28 57 69 65  
+00E1BC  1  4A 6F 68 61  t3:     .byte "Johannes Brahms, 1868 - public domain", 0
+00E1C0  1  6E 6E 65 73  
+00E1C4  1  20 42 72 61  
+00E1E2  1  33 20 76 6F  t4:     .byte "3 voices: melody (triangle), bass (triangle), harmony (sawtooth)", 0
+00E1E6  1  69 63 65 73  
+00E1EA  1  3A 20 6D 65  
+00E223  1  4D 65 6C 6F  l1:     .byte "Melody", 0
+00E227  1  64 79 00     
+00E22A  1  42 61 73 73  l2:     .byte "Bass", 0
+00E22E  1  00           
+00E22F  1  48 61 72 6D  l3:     .byte "Harmony", 0
+00E233  1  6F 6E 79 00  
+00E237  1  50 72 65 73  t5:     .byte "Press any key to stop", 0
+00E23B  1  73 20 61 6E  
+00E23F  1  79 20 6B 65  
+00E24D  1               
+00E24D  1  5F F9 2D     slo:    .byte <s_melody, <s_bass, <s_harmony
+00E250  1  E2 E2 E3     shi:    .byte >s_melody, >s_bass, >s_harmony
+00E253  1  0F 0A 05     vols:   .byte 15, 10, 5
+00E256  1  01 01 02     waves:  .byte 1, 1, 2
+00E259  1  0E DB FE     glyphs: .byte 14, 219, 254      ; a note sign, a block, a small square (CP437)
+00E25C  1  1F 1D 1B     colors: .byte $1F, $1D, $1B     ; on the blue background: white, magenta, cyan
+00E25F  1               
+00E25F  1                       .include "song.inc"
+00E25F  2               ; generated by song.py - Brahms' Lullaby, Op. 49 No. 4 (public domain)
+00E25F  2               TICK = 18
+00E25F  2               s_melody:
+00E25F  2  40 01 0E             .byte  64, 1,  14
+00E262  2  40 01 0E             .byte  64, 1,  14
+00E265  2  43 04 44             .byte  67, 4,  68
+00E268  2  40 01 0E             .byte  64, 1,  14
+00E26B  2  40 01 0E             .byte  64, 1,  14
+00E26E  2  43 04 44             .byte  67, 4,  68
+00E271  2  40 01 0E             .byte  64, 1,  14
+00E274  2  43 01 0E             .byte  67, 1,  14
+00E277  2  48 02 20             .byte  72, 2,  32
+00E27A  2  47 03 32             .byte  71, 3,  50
+00E27D  2  45 01 0E             .byte  69, 1,  14
+00E280  2  45 02 20             .byte  69, 2,  32
+00E283  2  43 02 20             .byte  67, 2,  32
+00E286  2  3E 01 0E             .byte  62, 1,  14
+00E289  2  40 01 0E             .byte  64, 1,  14
+00E28C  2  41 02 20             .byte  65, 2,  32
+00E28F  2  3E 02 20             .byte  62, 2,  32
+00E292  2  3E 01 0E             .byte  62, 1,  14
+00E295  2  40 01 0E             .byte  64, 1,  14
+00E298  2  41 04 44             .byte  65, 4,  68
+00E29B  2  3E 01 0E             .byte  62, 1,  14
+00E29E  2  41 01 0E             .byte  65, 1,  14
+00E2A1  2  47 01 0E             .byte  71, 1,  14
+00E2A4  2  45 01 0E             .byte  69, 1,  14
+00E2A7  2  43 02 20             .byte  67, 2,  32
+00E2AA  2  47 02 20             .byte  71, 2,  32
+00E2AD  2  48 04 44             .byte  72, 4,  68
+00E2B0  2  3C 01 0E             .byte  60, 1,  14
+00E2B3  2  3C 01 0E             .byte  60, 1,  14
+00E2B6  2  48 04 44             .byte  72, 4,  68
+00E2B9  2  45 01 0E             .byte  69, 1,  14
+00E2BC  2  41 01 0E             .byte  65, 1,  14
+00E2BF  2  43 04 44             .byte  67, 4,  68
+00E2C2  2  40 01 0E             .byte  64, 1,  14
+00E2C5  2  3C 01 0E             .byte  60, 1,  14
+00E2C8  2  41 02 20             .byte  65, 2,  32
+00E2CB  2  43 02 20             .byte  67, 2,  32
+00E2CE  2  45 02 20             .byte  69, 2,  32
+00E2D1  2  43 04 44             .byte  67, 4,  68
+00E2D4  2  3C 01 0E             .byte  60, 1,  14
+00E2D7  2  3C 01 0E             .byte  60, 1,  14
+00E2DA  2  48 04 44             .byte  72, 4,  68
+00E2DD  2  45 01 0E             .byte  69, 1,  14
+00E2E0  2  41 01 0E             .byte  65, 1,  14
+00E2E3  2  43 04 44             .byte  67, 4,  68
+00E2E6  2  40 01 0E             .byte  64, 1,  14
+00E2E9  2  3C 01 0E             .byte  60, 1,  14
+00E2EC  2  41 02 20             .byte  65, 2,  32
+00E2EF  2  40 02 20             .byte  64, 2,  32
+00E2F2  2  3E 02 20             .byte  62, 2,  32
+00E2F5  2  3C 06 68             .byte  60, 6, 104
+00E2F8  2  FF                   .byte $FF
+00E2F9  2               s_bass:
+00E2F9  2  00 02 00             .byte   0, 2,   0
+00E2FC  2  30 06 62             .byte  48, 6,  98
+00E2FF  2  30 06 62             .byte  48, 6,  98
+00E302  2  29 06 62             .byte  41, 6,  98
+00E305  2  2B 06 62             .byte  43, 6,  98
+00E308  2  2B 06 62             .byte  43, 6,  98
+00E30B  2  2B 06 62             .byte  43, 6,  98
+00E30E  2  2B 06 62             .byte  43, 6,  98
+00E311  2  30 06 62             .byte  48, 6,  98
+00E314  2  29 06 62             .byte  41, 6,  98
+00E317  2  30 06 62             .byte  48, 6,  98
+00E31A  2  29 06 62             .byte  41, 6,  98
+00E31D  2  30 06 62             .byte  48, 6,  98
+00E320  2  29 06 62             .byte  41, 6,  98
+00E323  2  30 06 62             .byte  48, 6,  98
+00E326  2  2B 06 62             .byte  43, 6,  98
+00E329  2  30 06 62             .byte  48, 6,  98
+00E32C  2  FF                   .byte $FF
+00E32D  2               s_harmony:
+00E32D  2  00 02 00             .byte   0, 2,   0
+00E330  2  00 02 00             .byte   0, 2,   0
+00E333  2  34 02 20             .byte  52, 2,  32
+00E336  2  37 02 20             .byte  55, 2,  32
+00E339  2  00 02 00             .byte   0, 2,   0
+00E33C  2  34 02 20             .byte  52, 2,  32
+00E33F  2  37 02 20             .byte  55, 2,  32
+00E342  2  00 02 00             .byte   0, 2,   0
+00E345  2  39 02 20             .byte  57, 2,  32
+00E348  2  3C 02 20             .byte  60, 2,  32
+00E34B  2  00 02 00             .byte   0, 2,   0
+00E34E  2  3B 02 20             .byte  59, 2,  32
+00E351  2  3E 02 20             .byte  62, 2,  32
+00E354  2  00 02 00             .byte   0, 2,   0
+00E357  2  3B 02 20             .byte  59, 2,  32
+00E35A  2  41 02 20             .byte  65, 2,  32
+00E35D  2  00 02 00             .byte   0, 2,   0
+00E360  2  3B 02 20             .byte  59, 2,  32
+00E363  2  41 02 20             .byte  65, 2,  32
+00E366  2  00 02 00             .byte   0, 2,   0
+00E369  2  3B 02 20             .byte  59, 2,  32
+00E36C  2  41 02 20             .byte  65, 2,  32
+00E36F  2  00 02 00             .byte   0, 2,   0
+00E372  2  34 02 20             .byte  52, 2,  32
+00E375  2  37 02 20             .byte  55, 2,  32
+00E378  2  00 02 00             .byte   0, 2,   0
+00E37B  2  39 02 20             .byte  57, 2,  32
+00E37E  2  3C 02 20             .byte  60, 2,  32
+00E381  2  00 02 00             .byte   0, 2,   0
+00E384  2  34 02 20             .byte  52, 2,  32
+00E387  2  37 02 20             .byte  55, 2,  32
+00E38A  2  00 02 00             .byte   0, 2,   0
+00E38D  2  39 02 20             .byte  57, 2,  32
+00E390  2  3C 02 20             .byte  60, 2,  32
+00E393  2  00 02 00             .byte   0, 2,   0
+00E396  2  34 02 20             .byte  52, 2,  32
+00E399  2  37 02 20             .byte  55, 2,  32
+00E39C  2  00 02 00             .byte   0, 2,   0
+00E39F  2  39 02 20             .byte  57, 2,  32
+00E3A2  2  3C 02 20             .byte  60, 2,  32
+00E3A5  2  00 02 00             .byte   0, 2,   0
+00E3A8  2  34 02 20             .byte  52, 2,  32
+00E3AB  2  37 02 20             .byte  55, 2,  32
+00E3AE  2  00 02 00             .byte   0, 2,   0
+00E3B1  2  3B 02 20             .byte  59, 2,  32
+00E3B4  2  41 02 20             .byte  65, 2,  32
+00E3B7  2  00 02 00             .byte   0, 2,   0
+00E3BA  2  34 02 20             .byte  52, 2,  32
+00E3BD  2  37 02 20             .byte  55, 2,  32
+00E3C0  2  FF                   .byte $FF
+00E3C1  2               
+00E3C1  1               
+00E3C1  1                       .assert * <= $F000, error, "the demo must fit in $E000-$EFFF"
+00E3C1  1               

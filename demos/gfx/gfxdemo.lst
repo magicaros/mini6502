@@ -1,0 +1,929 @@
+ca65 V2.19 - Git 52727a5
+Main file   : gfxdemo.asm
+Current file: gfxdemo.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; gfxdemo.asm - mini6502 graphics demo                    (bank RAM $E000-$EFFF)
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain. Shows the 160x200 graphics: a landscape drawn with the
+000000r 1               ; blitter, 8 bouncing balls with SHADOW sprites, 4 of them BEHIND the
+000000r 1               ; scenery, a drifting cloud and its shadow, collision counters in the text
+000000r 1               ; layer on top (MODE 2).
+000000r 1               ;
+000000r 1               ;   L GFXDEMO E000 03     load into bank 3 (any bank works)
+000000r 1               ;   D020: 03              select it
+000000r 1               ;   E000R                 run (CALL $E000 from BASIC)
+000000r 1               ; Keys: N night (MASTER brightness) on/off, anything else stops it.
+000000r 1               ; Uses no zero page: the variables live in this bank, so BASIC can CALL it.
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1               SYSCTL  = $D000
+000000r 1               FRAME   = $D001
+000000r 1               KBD     = $D010
+000000r 1               KBDCR   = $D011
+000000r 1               DSP     = $D012
+000000r 1               CURX    = $D015
+000000r 1               CURY    = $D016
+000000r 1               BANK    = $D020
+000000r 1               COLOR   = $D021
+000000r 1               BEEP    = $D100
+000000r 1               DMASRC  = $D210         ; source, destination, length: 3 bytes each
+000000r 1               DMACMD  = $D219
+000000r 1               
+000000r 1               MODE    = $D300         ; 0 text, 1 graphics, 2 graphics + text on top
+000000r 1               INTENS  = $D303
+000000r 1               MASTER  = $D304
+000000r 1               PALIDX  = $D308
+000000r 1               PALR    = $D309
+000000r 1               PALG    = $D30A
+000000r 1               PALB    = $D30B         ; writing B moves PALIDX on
+000000r 1               BX0     = $D310         ; blitter
+000000r 1               BY0     = $D311
+000000r 1               BX1     = $D312
+000000r 1               BY1     = $D313
+000000r 1               BCOL    = $D314
+000000r 1               BCMD    = $D318
+000000r 1               COLLSS  = $D320         ; sprite-sprite collisions, sprites 0-7
+000000r 1               COLLBG  = $D324         ; sprite-background collisions, sprites 0-7
+000000r 1               SPR     = $D400         ; sprite N: X, Y, IMAGE, FLAGS at $D400 + 8N
+000000r 1               
+000000r 1               C_CLEAR = 1
+000000r 1               C_LINE  = 3
+000000r 1               C_BOXF  = 5
+000000r 1               C_DIM   = 8
+000000r 1               C_STAMP = 10
+000000r 1               
+000000r 1               F_ON    = 1
+000000r 1               F_DBL   = 8
+000000r 1               F_BEHIND = 16
+000000r 1               F_SHADOW = 32
+000000r 1               
+000000r 1               NBALLS  = 8
+000000r 1               GROUND  = 160           ; first ground row
+000000r 1               BALLY   = GROUND        ; ball sprite Y when it touches the ground (Y-16+16)
+000000r 1               
+000000r 1               ; blitter: CMD with x0,y0,x1,y1,colour
+000000r 1               .macro  BLIT cmd, x0, y0, x1, y1, col
+000000r 1                       lda #x0
+000000r 1                       sta BX0
+000000r 1                       lda #y0
+000000r 1                       sta BY0
+000000r 1                       lda #x1
+000000r 1                       sta BX1
+000000r 1                       lda #y1
+000000r 1                       sta BY1
+000000r 1                       lda #col
+000000r 1                       sta BCOL
+000000r 1                       lda #cmd
+000000r 1                       sta BCMD
+000000r 1               .endmacro
+000000r 1               
+000000r 1                       .org $E000
+00E000  1               
+00E000  1               start:
+00E000  1  AD 21 D0             lda COLOR
+00E003  1  8D F1 E4             sta oldcol
+00E006  1  A9 0F                lda #$0F                ; white on black: black is see-through
+00E008  1  8D 21 D0             sta COLOR
+00E00B  1  A9 02                lda #2
+00E00D  1  8D 00 D0             sta SYSCTL              ; clear the text screen
+00E010  1               
+00E010  1               ; palette 0 = sky blue: the sky is colour 0, the "background" that BEHIND
+00E010  1               ; sprites show in front of
+00E010  1  A9 00                lda #0
+00E012  1  8D 08 D3             sta PALIDX
+00E015  1  A9 64                lda #$64
+00E017  1  8D 09 D3             sta PALR
+00E01A  1  A9 AA                lda #$AA
+00E01C  1  8D 0A D3             sta PALG
+00E01F  1  A9 FF                lda #$FF
+00E021  1  8D 0B D3             sta PALB
+00E024  1               
+00E024  1               ; the sprite images to $FD0000 with the DMA: this bank is at extended
+00E024  1               ; address BANK * $1000, so images is at BANK * $1000 + (images - $E000)
+00E024  1  A9 F2                lda #<(images - $E000)
+00E026  1  8D 10 D2             sta DMASRC
+00E029  1  AD 20 D0             lda BANK
+00E02C  1  0A                   asl
+00E02D  1  0A                   asl
+00E02E  1  0A                   asl
+00E02F  1  0A                   asl
+00E030  1  09 04                ora #>(images - $E000)
+00E032  1  8D 11 D2             sta DMASRC+1
+00E035  1  AD 20 D0             lda BANK
+00E038  1  4A                   lsr
+00E039  1  4A                   lsr
+00E03A  1  4A                   lsr
+00E03B  1  4A                   lsr
+00E03C  1  8D 12 D2             sta DMASRC+2
+00E03F  1  A9 00                lda #$00                ; destination $FD0000
+00E041  1  8D 13 D2             sta DMASRC+3
+00E044  1  8D 14 D2             sta DMASRC+4
+00E047  1  A9 FD                lda #$FD
+00E049  1  8D 15 D2             sta DMASRC+5
+00E04C  1  A9 00                lda #<(images_end - images)
+00E04E  1  8D 16 D2             sta DMASRC+6
+00E051  1  A9 08                lda #>(images_end - images)
+00E053  1  8D 17 D2             sta DMASRC+7
+00E056  1  A9 00                lda #0
+00E058  1  8D 18 D2             sta DMASRC+8
+00E05B  1  A9 01                lda #1                  ; COPY
+00E05D  1  8D 19 D2             sta DMACMD
+00E060  1               
+00E060  1  20 EB E0             jsr scenery
+00E063  1  20 28 E2             jsr status
+00E066  1  20 7C E3             jsr initballs
+00E069  1  A9 02                lda #2                  ; graphics with the text on top
+00E06B  1  8D 00 D3             sta MODE
+00E06E  1               
+00E06E  1               ; --- main loop: once per frame ---------------------------------------------------
+00E06E  1               mainloop:
+00E06E  1  AD 01 D0             lda FRAME
+00E071  1  CD 01 D0     @wait:  cmp FRAME
+00E074  1  F0 FB                beq @wait
+00E076  1  20 F3 E3             jsr moveballs
+00E079  1  20 89 E4             jsr movecloud
+00E07C  1  AD 20 D3             lda COLLSS              ; balls touching each other this frame?
+00E07F  1  F0 08                beq @nohit
+00E081  1  EE E5 E4             inc hits
+00E084  1  D0 03                bne @nohit
+00E086  1  EE E6 E4             inc hits+1
+00E089  1  AD 24 D3     @nohit: lda COLLBG              ; balls touching the scenery?
+00E08C  1  F0 08                beq @notouch
+00E08E  1  EE E7 E4             inc touch
+00E091  1  D0 03                bne @notouch
+00E093  1  EE E8 E4             inc touch+1
+00E096  1               @notouch:
+00E096  1  20 1B E3             jsr counters
+00E099  1  AD 11 D0             lda KBDCR
+00E09C  1  10 D0                bpl mainloop
+00E09E  1  AD 10 D0             lda KBD
+00E0A1  1  29 5F                and #$5F                ; upper case
+00E0A3  1  C9 4E                cmp #'N'
+00E0A5  1  D0 13                bne quit
+00E0A7  1  AD 04 D3             lda MASTER              ; night: 7/16 of the brightness, or back to 16
+00E0AA  1  C9 10                cmp #16
+00E0AC  1  F0 04                beq @night
+00E0AE  1  A9 10                lda #16
+00E0B0  1  D0 02                bne @set
+00E0B2  1  A9 07        @night: lda #7
+00E0B4  1  8D 04 D3     @set:   sta MASTER
+00E0B7  1  4C 6E E0             jmp mainloop
+00E0BA  1               
+00E0BA  1               quit:
+00E0BA  1  A9 00                lda #0
+00E0BC  1  8D 00 D3             sta MODE                ; back to text
+00E0BF  1  A2 00                ldx #0                  ; sprites off
+00E0C1  1  9D 03 D4     @off:   sta SPR+3,x
+00E0C4  1  E8                   inx
+00E0C5  1  E8                   inx
+00E0C6  1  E8                   inx
+00E0C7  1  E8                   inx
+00E0C8  1  E8                   inx
+00E0C9  1  E8                   inx
+00E0CA  1  E8                   inx
+00E0CB  1  E8                   inx
+00E0CC  1  D0 F3                bne @off
+00E0CE  1  8D 08 D3             sta PALIDX              ; palette 0 black again
+00E0D1  1  8D 09 D3             sta PALR
+00E0D4  1  8D 0A D3             sta PALG
+00E0D7  1  8D 0B D3             sta PALB
+00E0DA  1  A9 10                lda #16
+00E0DC  1  8D 04 D3             sta MASTER
+00E0DF  1  AD F1 E4             lda oldcol
+00E0E2  1  8D 21 D0             sta COLOR
+00E0E5  1  A9 02                lda #2
+00E0E7  1  8D 00 D0             sta SYSCTL
+00E0EA  1  60                   rts
+00E0EB  1               
+00E0EB  1               ; --- the landscape, drawn once on page 0 ----------------------------------------
+00E0EB  1               scenery:
+00E0EB  1  A9 00 8D 10          BLIT C_CLEAR, 0, 0, 0, 0, 0             ; sky
+00E0EF  1  D3 A9 00 8D  
+00E0F3  1  11 D3 A9 00  
+00E109  1               ; two mountains, one vertical line per column: top = the lower of
+00E109  1               ; 90 + |x - 40| and 100 + |x - 110|; the side left of a peak is DIM (shade)
+00E109  1  A9 00                lda #0
+00E10B  1  8D EC E4             sta xx
+00E10E  1  AD EC E4     @col:   lda xx
+00E111  1  38                   sec
+00E112  1  E9 28                sbc #40
+00E114  1  B0 04                bcs @p1
+00E116  1  49 FF                eor #$FF
+00E118  1  69 01                adc #1
+00E11A  1  18           @p1:    clc
+00E11B  1  69 5A                adc #90
+00E11D  1  8D ED E4             sta t1
+00E120  1  AD EC E4             lda xx
+00E123  1  38                   sec
+00E124  1  E9 6E                sbc #110
+00E126  1  B0 04                bcs @p2
+00E128  1  49 FF                eor #$FF
+00E12A  1  69 01                adc #1
+00E12C  1  18           @p2:    clc
+00E12D  1  69 64                adc #100
+00E12F  1  CD ED E4             cmp t1
+00E132  1  90 0B                bcc @second             ; mountain 2 is higher here
+00E134  1  AD EC E4             lda xx                  ; mountain 1
+00E137  1  C9 28                cmp #40
+00E139  1  AD ED E4             lda t1
+00E13C  1  4C 4A E1             jmp @draw
+00E13F  1               @second:
+00E13F  1  8D ED E4             sta t1
+00E142  1  AD EC E4             lda xx
+00E145  1  C9 6E                cmp #110
+00E147  1  AD ED E4             lda t1
+00E14A  1  8D 11 D3     @draw:  sta BY0                 ; carry clear: left of the peak
+00E14D  1  A9 13                lda #19                 ; grey
+00E14F  1  B0 02                bcs @lit
+00E151  1  09 20                ora #$20                ; DIM
+00E153  1  8D 14 D3     @lit:   sta BCOL
+00E156  1  AD EC E4             lda xx
+00E159  1  8D 10 D3             sta BX0
+00E15C  1  8D 12 D3             sta BX1
+00E15F  1  A9 9F                lda #GROUND - 1
+00E161  1  8D 13 D3             sta BY1
+00E164  1  A9 03                lda #C_LINE
+00E166  1  8D 18 D3             sta BCMD
+00E169  1  EE EC E4             inc xx
+00E16C  1  AD EC E4             lda xx
+00E16F  1  C9 A0                cmp #160
+00E171  1  D0 9B                bne @col
+00E173  1  A9 00 8D 10          BLIT C_BOXF, 0, GROUND, 159, 199, 26    ; ground
+00E177  1  D3 A9 A0 8D  
+00E17B  1  11 D3 A9 9F  
+00E191  1  A9 00 8D 10          BLIT C_LINE, 0, GROUND, 159, GROUND, 10 ; grass edge
+00E195  1  D3 A9 A0 8D  
+00E199  1  11 D3 A9 9F  
+00E1AF  1  A9 46 8D 10          BLIT C_BOXF, 70, 128, 74, GROUND - 1, 25 ; tree trunk
+00E1B3  1  D3 A9 80 8D  
+00E1B7  1  11 D3 A9 4A  
+00E1CD  1  A9 3C 8D 10          BLIT C_BOXF, 60, 104, 84, 130, 2        ; foliage
+00E1D1  1  D3 A9 68 8D  
+00E1D5  1  11 D3 A9 54  
+00E1EB  1  A9 4D 8D 10          BLIT C_DIM, 77, 104, 84, 130, 0         ; its shaded side
+00E1EF  1  D3 A9 68 8D  
+00E1F3  1  11 D3 A9 54  
+00E209  1  A9 80 8D 10          BLIT C_STAMP, 128, 10, 0, 0, 5          ; the sun: image 5
+00E20D  1  D3 A9 0A 8D  
+00E211  1  11 D3 A9 00  
+00E227  1  60                   rts
+00E228  1               
+00E228  1               ; --- the text layer: two opaque lines, the rest see-through ----------------------
+00E228  1               status:
+00E228  1  A9 1F                lda #$1F                ; white on blue
+00E22A  1  8D 21 D0             sta COLOR
+00E22D  1  A2 00                ldx #0
+00E22F  1  8E 15 D0             stx CURX
+00E232  1  8E 16 D0             stx CURY
+00E235  1  20 DE E2             jsr puts80
+00E238  1  20 6D 69 6E          .byte " mini6502 160x200 graphics: blitter, sprites, SHADOW, BEHIND, collisions", 0
+00E23C  1  69 36 35 30  
+00E240  1  32 20 31 36  
+00E281  1  A9 00                lda #0
+00E283  1  8D 15 D0             sta CURX
+00E286  1  A9 18                lda #24
+00E288  1  8D 16 D0             sta CURY
+00E28B  1  20 DE E2             jsr puts80
+00E28E  1  73 70 72 69          .byte "sprite hits 00000   scenery touches 00000      N night on/off, other key: stop", 0
+00E292  1  74 65 20 68  
+00E296  1  69 74 73 20  
+00E2DD  1  60                   rts
+00E2DE  1               
+00E2DE  1               ; Prints the string after the JSR, then spaces up to column 79 (not 80: the
+00E2DE  1               ; cursor would wrap and scroll)
+00E2DE  1               puts80:
+00E2DE  1  68                   pla
+00E2DF  1  8D EF E4             sta sptr
+00E2E2  1  68                   pla
+00E2E3  1  8D F0 E4             sta sptr+1
+00E2E6  1  EE EF E4     @loop:  inc sptr
+00E2E9  1  D0 03                bne @get
+00E2EB  1  EE F0 E4             inc sptr+1
+00E2EE  1  AD EF E4     @get:   lda sptr
+00E2F1  1  8D FB E2             sta @ld+1
+00E2F4  1  AD F0 E4             lda sptr+1
+00E2F7  1  8D FC E2             sta @ld+2
+00E2FA  1  AD FF FF     @ld:    lda $FFFF               ; (self-modified: no zero page needed)
+00E2FD  1  F0 05                beq @pad
+00E2FF  1  8D 12 D0             sta DSP
+00E302  1  D0 E2                bne @loop
+00E304  1  AD 15 D0     @pad:   lda CURX
+00E307  1  C9 4F                cmp #79
+00E309  1  B0 07                bcs @done
+00E30B  1  A9 20                lda #' '
+00E30D  1  8D 12 D0             sta DSP
+00E310  1  D0 F2                bne @pad
+00E312  1  AD F0 E4     @done:  lda sptr+1              ; return after the 0
+00E315  1  48                   pha
+00E316  1  AD EF E4             lda sptr
+00E319  1  48                   pha
+00E31A  1  60                   rts
+00E31B  1               
+00E31B  1               ; The two counters in the bottom line
+00E31B  1               counters:
+00E31B  1  A9 1F                lda #$1F
+00E31D  1  8D 21 D0             sta COLOR
+00E320  1  A9 18                lda #24
+00E322  1  8D 16 D0             sta CURY
+00E325  1  A9 0C                lda #12
+00E327  1  8D 15 D0             sta CURX
+00E32A  1  AD E5 E4             lda hits
+00E32D  1  AE E6 E4             ldx hits+1
+00E330  1  20 41 E3             jsr dec5
+00E333  1  A9 24                lda #36
+00E335  1  8D 15 D0             sta CURX
+00E338  1  AD E7 E4             lda touch
+00E33B  1  AE E8 E4             ldx touch+1
+00E33E  1  4C 41 E3             jmp dec5
+00E341  1               
+00E341  1               ; Prints XA (X high) as 5 decimal digits
+00E341  1               dec5:
+00E341  1  8D E9 E4             sta num
+00E344  1  8E EA E4             stx num+1
+00E347  1  A0 00                ldy #0                  ; power of ten index
+00E349  1  A2 30        @digit: ldx #'0'
+00E34B  1  AD E9 E4     @sub:   lda num
+00E34E  1  38                   sec
+00E34F  1  F9 72 E3             sbc p10lo,y
+00E352  1  8D ED E4             sta t1
+00E355  1  AD EA E4             lda num+1
+00E358  1  F9 77 E3             sbc p10hi,y
+00E35B  1  90 0C                bcc @out
+00E35D  1  8D EA E4             sta num+1
+00E360  1  AD ED E4             lda t1
+00E363  1  8D E9 E4             sta num
+00E366  1  E8                   inx
+00E367  1  D0 E2                bne @sub
+00E369  1  8E 12 D0     @out:   stx DSP
+00E36C  1  C8                   iny
+00E36D  1  C0 05                cpy #5
+00E36F  1  D0 D8                bne @digit
+00E371  1  60                   rts
+00E372  1  10 E8 64 0A  p10lo:  .byte <10000, <1000, <100, <10, <1
+00E376  1  01           
+00E377  1  27 03 00 00  p10hi:  .byte >10000, >1000, >100, >10, >1
+00E37B  1  00           
+00E37C  1               
+00E37C  1               ; --- balls ------------------------------------------------------------------------
+00E37C  1               initballs:
+00E37C  1  A2 07                ldx #NBALLS - 1
+00E37E  1  BD 9D E4     @init:  lda startx,x
+00E381  1  9D B5 E4             sta bx,x
+00E384  1  BD A5 E4             lda startdx,x
+00E387  1  9D BD E4             sta bdx,x
+00E38A  1  BD AD E4             lda starty,x
+00E38D  1  9D CD E4             sta byh,x
+00E390  1  A9 00                lda #0
+00E392  1  9D C5 E4             sta byl,x
+00E395  1  9D D5 E4             sta bvl,x
+00E398  1  9D DD E4             sta bvh,x
+00E39B  1  8A                   txa                     ; sprite x: ball, image x AND 3
+00E39C  1  0A                   asl
+00E39D  1  0A                   asl
+00E39E  1  0A                   asl
+00E39F  1  A8                   tay
+00E3A0  1  8A                   txa
+00E3A1  1  29 03                and #3
+00E3A3  1  99 02 D4             sta SPR+2,y
+00E3A6  1  A9 01                lda #F_ON
+00E3A8  1  E0 04                cpx #4
+00E3AA  1  90 02                bcc @front
+00E3AC  1  A9 11                lda #F_ON | F_BEHIND    ; balls 4-7 pass behind the scenery
+00E3AE  1  99 03 D4     @front: sta SPR+3,y
+00E3B1  1  A9 04                lda #4                  ; its shadow: sprite x + 8, image 4
+00E3B3  1  99 42 D4             sta SPR+64+2,y
+00E3B6  1  A9 21                lda #F_ON | F_SHADOW
+00E3B8  1  99 43 D4             sta SPR+64+3,y
+00E3BB  1  A9 A2                lda #GROUND + 2         ; on the ground
+00E3BD  1  99 41 D4             sta SPR+64+1,y
+00E3C0  1  CA                   dex
+00E3C1  1  10 BB                bpl @init
+00E3C3  1  A9 06                lda #6                  ; cloud: sprite 16, image 6, double size
+00E3C5  1  8D 82 D4             sta SPR+128+2
+00E3C8  1  A9 09                lda #F_ON | F_DBL
+00E3CA  1  8D 83 D4             sta SPR+128+3
+00E3CD  1  A9 2E                lda #46
+00E3CF  1  8D 81 D4             sta SPR+128+1
+00E3D2  1  A9 07                lda #7                  ; its shadow: sprite 17, image 7, double size
+00E3D4  1  8D 8A D4             sta SPR+136+2
+00E3D7  1  A9 29                lda #F_ON | F_DBL | F_SHADOW
+00E3D9  1  8D 8B D4             sta SPR+136+3
+00E3DC  1  A9 A2                lda #GROUND + 2
+00E3DE  1  8D 89 D4             sta SPR+136+1
+00E3E1  1  A9 00                lda #0
+00E3E3  1  8D E5 E4             sta hits
+00E3E6  1  8D E6 E4             sta hits+1
+00E3E9  1  8D E7 E4             sta touch
+00E3EC  1  8D E8 E4             sta touch+1
+00E3EF  1  8D EB E4             sta cloudx
+00E3F2  1  60                   rts
+00E3F3  1               
+00E3F3  1               ; Gravity, bouncing on the ground and on the sides; updates the sprites
+00E3F3  1               moveballs:
+00E3F3  1  A2 07                ldx #NBALLS - 1
+00E3F5  1  BD D5 E4     @ball:  lda bvl,x               ; speed += 0.125 pixel/frame
+00E3F8  1  18                   clc
+00E3F9  1  69 20                adc #$20
+00E3FB  1  9D D5 E4             sta bvl,x
+00E3FE  1  BD DD E4             lda bvh,x
+00E401  1  69 00                adc #0
+00E403  1  9D DD E4             sta bvh,x
+00E406  1  BD C5 E4             lda byl,x               ; y += speed
+00E409  1  18                   clc
+00E40A  1  7D D5 E4             adc bvl,x
+00E40D  1  9D C5 E4             sta byl,x
+00E410  1  BD CD E4             lda byh,x
+00E413  1  7D DD E4             adc bvh,x
+00E416  1  9D CD E4             sta byh,x
+00E419  1  C9 A0                cmp #BALLY              ; on the ground (or below)?
+00E41B  1  90 36                bcc @air
+00E41D  1  BD DD E4             lda bvh,x               ; only when falling
+00E420  1  30 31                bmi @air
+00E422  1  BD C5 E4             lda byl,x               ; mirror the overshoot back above the
+00E425  1  8D ED E4             sta t1                  ; ground: y = BALLY - (y - BALLY). Just
+00E428  1  BD CD E4             lda byh,x               ; stopping at BALLY would lose a little
+00E42B  1  38                   sec                     ; height at every bounce
+00E42C  1  E9 A0                sbc #BALLY
+00E42E  1  8D EE E4             sta t2
+00E431  1  A9 00                lda #0
+00E433  1  38                   sec
+00E434  1  ED ED E4             sbc t1
+00E437  1  9D C5 E4             sta byl,x
+00E43A  1  A9 A0                lda #BALLY
+00E43C  1  ED EE E4             sbc t2
+00E43F  1  9D CD E4             sta byh,x
+00E442  1  A9 00                lda #0                  ; speed = -speed: bounces forever
+00E444  1  38                   sec
+00E445  1  FD D5 E4             sbc bvl,x
+00E448  1  9D D5 E4             sta bvl,x
+00E44B  1  A9 00                lda #0
+00E44D  1  FD DD E4             sbc bvh,x
+00E450  1  9D DD E4             sta bvh,x
+00E453  1  BD B5 E4     @air:   lda bx,x                ; x += dx, bounce on the sides
+00E456  1  18                   clc
+00E457  1  7D BD E4             adc bdx,x
+00E45A  1  9D B5 E4             sta bx,x
+00E45D  1  C9 0C                cmp #12                 ; the ball is columns 4-11 of its image
+00E45F  1  F0 04                beq @flip
+00E461  1  C9 A4                cmp #164
+00E463  1  D0 09                bne @spr
+00E465  1  A9 00        @flip:  lda #0
+00E467  1  38                   sec
+00E468  1  FD BD E4             sbc bdx,x
+00E46B  1  9D BD E4             sta bdx,x
+00E46E  1  8A           @spr:   txa
+00E46F  1  0A                   asl
+00E470  1  0A                   asl
+00E471  1  0A                   asl
+00E472  1  A8                   tay
+00E473  1  BD B5 E4             lda bx,x
+00E476  1  99 00 D4             sta SPR,y
+00E479  1  99 40 D4             sta SPR+64,y            ; the shadow follows below
+00E47C  1  BD CD E4             lda byh,x
+00E47F  1  99 01 D4             sta SPR+1,y
+00E482  1  CA                   dex
+00E483  1  30 03                bmi @done
+00E485  1  4C F5 E3             jmp @ball
+00E488  1  60           @done:  rts
+00E489  1               
+00E489  1               ; The cloud drifts right every 4th frame; its shadow is on the ground below
+00E489  1               movecloud:
+00E489  1  AD 01 D0             lda FRAME
+00E48C  1  29 03                and #3
+00E48E  1  D0 03                bne @done
+00E490  1  EE EB E4             inc cloudx
+00E493  1  AD EB E4     @done:  lda cloudx
+00E496  1  8D 80 D4             sta SPR+128
+00E499  1  8D 88 D4             sta SPR+136
+00E49C  1  60                   rts
+00E49D  1               
+00E49D  1               ; start positions (sprite coordinates: screen + 16)
+00E49D  1  14 32 5A 8C  startx:  .byte 20, 50, 90, 140, 35, 75, 115, 155
+00E4A1  1  23 4B 73 9B  
+00E4A5  1  01 FF 01 FF  startdx: .byte 1, $FF, 1, $FF, 1, 1, $FF, $FF
+00E4A9  1  01 01 FF FF  
+00E4AD  1  28 46 64 37  starty:  .byte 40, 70, 100, 55, 85, 120, 65, 30
+00E4B1  1  55 78 41 1E  
+00E4B5  1               
+00E4B5  1               ; variables
+00E4B5  1  xx xx xx xx  bx:     .res NBALLS
+00E4B9  1  xx xx xx xx  
+00E4BD  1  xx xx xx xx  bdx:    .res NBALLS
+00E4C1  1  xx xx xx xx  
+00E4C5  1  xx xx xx xx  byl:    .res NBALLS
+00E4C9  1  xx xx xx xx  
+00E4CD  1  xx xx xx xx  byh:    .res NBALLS
+00E4D1  1  xx xx xx xx  
+00E4D5  1  xx xx xx xx  bvl:    .res NBALLS
+00E4D9  1  xx xx xx xx  
+00E4DD  1  xx xx xx xx  bvh:    .res NBALLS
+00E4E1  1  xx xx xx xx  
+00E4E5  1  xx xx        hits:   .res 2
+00E4E7  1  xx xx        touch:  .res 2
+00E4E9  1  xx xx        num:    .res 2
+00E4EB  1  xx           cloudx: .res 1
+00E4EC  1  xx           xx:     .res 1
+00E4ED  1  xx           t1:     .res 1
+00E4EE  1  xx           t2:     .res 1
+00E4EF  1  xx xx        sptr:   .res 2
+00E4F1  1  xx           oldcol: .res 1
+00E4F2  1               
+00E4F2  1               images:
+00E4F2  1                       .include "images.inc"
+00E4F2  2               ; made by images.py: 8 sprite images, 16x16, $80 = transparent
+00E4F2  2               ; image 0
+00E4F2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$04,$04,$80,$80,$80,$80,$80,$80,$80
+00E4F6  2  80 80 80 04  
+00E4FA  2  04 80 80 80  
+00E502  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$04,$04,$04,$04,$80,$80,$80,$80,$80,$80
+00E506  2  80 80 04 04  
+00E50A  2  04 04 80 80  
+00E512  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$04,$04,$04,$04,$04,$04,$80,$80,$80,$80,$80
+00E516  2  80 04 04 04  
+00E51A  2  04 04 04 80  
+00E522  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$04,$0C,$04,$04,$04,$04,$80,$80,$80,$80,$80
+00E526  2  80 04 0C 04  
+00E52A  2  04 04 04 80  
+00E532  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$0C,$0F,$0C,$04,$04,$04,$80,$80,$80,$80,$80
+00E536  2  80 0C 0F 0C  
+00E53A  2  04 04 04 80  
+00E542  2  80 80 80 80          .byte $80,$80,$80,$80,$04,$0C,$0C,$0C,$04,$04,$04,$04,$80,$80,$80,$80
+00E546  2  04 0C 0C 0C  
+00E54A  2  04 04 04 04  
+00E552  2  80 80 80 80          .byte $80,$80,$80,$80,$04,$0C,$0C,$0C,$04,$04,$04,$04,$80,$80,$80,$80
+00E556  2  04 0C 0C 0C  
+00E55A  2  04 04 04 04  
+00E562  2  80 80 80 80          .byte $80,$80,$80,$80,$04,$04,$0C,$04,$04,$04,$04,$04,$80,$80,$80,$80
+00E566  2  04 04 0C 04  
+00E56A  2  04 04 04 04  
+00E572  2  80 80 80 80          .byte $80,$80,$80,$80,$04,$04,$04,$04,$04,$04,$04,$04,$80,$80,$80,$80
+00E576  2  04 04 04 04  
+00E57A  2  04 04 04 04  
+00E582  2  80 80 80 80          .byte $80,$80,$80,$80,$04,$04,$04,$04,$04,$04,$04,$04,$80,$80,$80,$80
+00E586  2  04 04 04 04  
+00E58A  2  04 04 04 04  
+00E592  2  80 80 80 80          .byte $80,$80,$80,$80,$04,$04,$04,$04,$04,$04,$04,$04,$80,$80,$80,$80
+00E596  2  04 04 04 04  
+00E59A  2  04 04 04 04  
+00E5A2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$04,$04,$04,$04,$04,$04,$80,$80,$80,$80,$80
+00E5A6  2  80 04 04 04  
+00E5AA  2  04 04 04 80  
+00E5B2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$04,$04,$04,$04,$04,$04,$80,$80,$80,$80,$80
+00E5B6  2  80 04 04 04  
+00E5BA  2  04 04 04 80  
+00E5C2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$04,$04,$04,$04,$04,$04,$80,$80,$80,$80,$80
+00E5C6  2  80 04 04 04  
+00E5CA  2  04 04 04 80  
+00E5D2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$04,$04,$04,$04,$80,$80,$80,$80,$80,$80
+00E5D6  2  80 80 04 04  
+00E5DA  2  04 04 80 80  
+00E5E2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$04,$04,$80,$80,$80,$80,$80,$80,$80
+00E5E6  2  80 80 80 04  
+00E5EA  2  04 80 80 80  
+00E5F2  2               ; image 1
+00E5F2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$01,$01,$80,$80,$80,$80,$80,$80,$80
+00E5F6  2  80 80 80 01  
+00E5FA  2  01 80 80 80  
+00E602  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$01,$01,$01,$01,$80,$80,$80,$80,$80,$80
+00E606  2  80 80 01 01  
+00E60A  2  01 01 80 80  
+00E612  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$01,$01,$01,$01,$01,$01,$80,$80,$80,$80,$80
+00E616  2  80 01 01 01  
+00E61A  2  01 01 01 80  
+00E622  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$01,$09,$01,$01,$01,$01,$80,$80,$80,$80,$80
+00E626  2  80 01 09 01  
+00E62A  2  01 01 01 80  
+00E632  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$09,$0F,$09,$01,$01,$01,$80,$80,$80,$80,$80
+00E636  2  80 09 0F 09  
+00E63A  2  01 01 01 80  
+00E642  2  80 80 80 80          .byte $80,$80,$80,$80,$01,$09,$09,$09,$01,$01,$01,$01,$80,$80,$80,$80
+00E646  2  01 09 09 09  
+00E64A  2  01 01 01 01  
+00E652  2  80 80 80 80          .byte $80,$80,$80,$80,$01,$09,$09,$09,$01,$01,$01,$01,$80,$80,$80,$80
+00E656  2  01 09 09 09  
+00E65A  2  01 01 01 01  
+00E662  2  80 80 80 80          .byte $80,$80,$80,$80,$01,$01,$09,$01,$01,$01,$01,$01,$80,$80,$80,$80
+00E666  2  01 01 09 01  
+00E66A  2  01 01 01 01  
+00E672  2  80 80 80 80          .byte $80,$80,$80,$80,$01,$01,$01,$01,$01,$01,$01,$01,$80,$80,$80,$80
+00E676  2  01 01 01 01  
+00E67A  2  01 01 01 01  
+00E682  2  80 80 80 80          .byte $80,$80,$80,$80,$01,$01,$01,$01,$01,$01,$01,$01,$80,$80,$80,$80
+00E686  2  01 01 01 01  
+00E68A  2  01 01 01 01  
+00E692  2  80 80 80 80          .byte $80,$80,$80,$80,$01,$01,$01,$01,$01,$01,$01,$01,$80,$80,$80,$80
+00E696  2  01 01 01 01  
+00E69A  2  01 01 01 01  
+00E6A2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$01,$01,$01,$01,$01,$01,$80,$80,$80,$80,$80
+00E6A6  2  80 01 01 01  
+00E6AA  2  01 01 01 80  
+00E6B2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$01,$01,$01,$01,$01,$01,$80,$80,$80,$80,$80
+00E6B6  2  80 01 01 01  
+00E6BA  2  01 01 01 80  
+00E6C2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$01,$01,$01,$01,$01,$01,$80,$80,$80,$80,$80
+00E6C6  2  80 01 01 01  
+00E6CA  2  01 01 01 80  
+00E6D2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$01,$01,$01,$01,$80,$80,$80,$80,$80,$80
+00E6D6  2  80 80 01 01  
+00E6DA  2  01 01 80 80  
+00E6E2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$01,$01,$80,$80,$80,$80,$80,$80,$80
+00E6E6  2  80 80 80 01  
+00E6EA  2  01 80 80 80  
+00E6F2  2               ; image 2
+00E6F2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$02,$02,$80,$80,$80,$80,$80,$80,$80
+00E6F6  2  80 80 80 02  
+00E6FA  2  02 80 80 80  
+00E702  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$02,$02,$02,$02,$80,$80,$80,$80,$80,$80
+00E706  2  80 80 02 02  
+00E70A  2  02 02 80 80  
+00E712  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$02,$02,$02,$02,$02,$02,$80,$80,$80,$80,$80
+00E716  2  80 02 02 02  
+00E71A  2  02 02 02 80  
+00E722  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$02,$0A,$02,$02,$02,$02,$80,$80,$80,$80,$80
+00E726  2  80 02 0A 02  
+00E72A  2  02 02 02 80  
+00E732  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$0A,$0F,$0A,$02,$02,$02,$80,$80,$80,$80,$80
+00E736  2  80 0A 0F 0A  
+00E73A  2  02 02 02 80  
+00E742  2  80 80 80 80          .byte $80,$80,$80,$80,$02,$0A,$0A,$0A,$02,$02,$02,$02,$80,$80,$80,$80
+00E746  2  02 0A 0A 0A  
+00E74A  2  02 02 02 02  
+00E752  2  80 80 80 80          .byte $80,$80,$80,$80,$02,$0A,$0A,$0A,$02,$02,$02,$02,$80,$80,$80,$80
+00E756  2  02 0A 0A 0A  
+00E75A  2  02 02 02 02  
+00E762  2  80 80 80 80          .byte $80,$80,$80,$80,$02,$02,$0A,$02,$02,$02,$02,$02,$80,$80,$80,$80
+00E766  2  02 02 0A 02  
+00E76A  2  02 02 02 02  
+00E772  2  80 80 80 80          .byte $80,$80,$80,$80,$02,$02,$02,$02,$02,$02,$02,$02,$80,$80,$80,$80
+00E776  2  02 02 02 02  
+00E77A  2  02 02 02 02  
+00E782  2  80 80 80 80          .byte $80,$80,$80,$80,$02,$02,$02,$02,$02,$02,$02,$02,$80,$80,$80,$80
+00E786  2  02 02 02 02  
+00E78A  2  02 02 02 02  
+00E792  2  80 80 80 80          .byte $80,$80,$80,$80,$02,$02,$02,$02,$02,$02,$02,$02,$80,$80,$80,$80
+00E796  2  02 02 02 02  
+00E79A  2  02 02 02 02  
+00E7A2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$02,$02,$02,$02,$02,$02,$80,$80,$80,$80,$80
+00E7A6  2  80 02 02 02  
+00E7AA  2  02 02 02 80  
+00E7B2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$02,$02,$02,$02,$02,$02,$80,$80,$80,$80,$80
+00E7B6  2  80 02 02 02  
+00E7BA  2  02 02 02 80  
+00E7C2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$02,$02,$02,$02,$02,$02,$80,$80,$80,$80,$80
+00E7C6  2  80 02 02 02  
+00E7CA  2  02 02 02 80  
+00E7D2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$02,$02,$02,$02,$80,$80,$80,$80,$80,$80
+00E7D6  2  80 80 02 02  
+00E7DA  2  02 02 80 80  
+00E7E2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$02,$02,$80,$80,$80,$80,$80,$80,$80
+00E7E6  2  80 80 80 02  
+00E7EA  2  02 80 80 80  
+00E7F2  2               ; image 3
+00E7F2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$06,$06,$80,$80,$80,$80,$80,$80,$80
+00E7F6  2  80 80 80 06  
+00E7FA  2  06 80 80 80  
+00E802  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$06,$06,$06,$06,$80,$80,$80,$80,$80,$80
+00E806  2  80 80 06 06  
+00E80A  2  06 06 80 80  
+00E812  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$06,$06,$06,$06,$06,$06,$80,$80,$80,$80,$80
+00E816  2  80 06 06 06  
+00E81A  2  06 06 06 80  
+00E822  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$06,$0E,$06,$06,$06,$06,$80,$80,$80,$80,$80
+00E826  2  80 06 0E 06  
+00E82A  2  06 06 06 80  
+00E832  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$0E,$0F,$0E,$06,$06,$06,$80,$80,$80,$80,$80
+00E836  2  80 0E 0F 0E  
+00E83A  2  06 06 06 80  
+00E842  2  80 80 80 80          .byte $80,$80,$80,$80,$06,$0E,$0E,$0E,$06,$06,$06,$06,$80,$80,$80,$80
+00E846  2  06 0E 0E 0E  
+00E84A  2  06 06 06 06  
+00E852  2  80 80 80 80          .byte $80,$80,$80,$80,$06,$0E,$0E,$0E,$06,$06,$06,$06,$80,$80,$80,$80
+00E856  2  06 0E 0E 0E  
+00E85A  2  06 06 06 06  
+00E862  2  80 80 80 80          .byte $80,$80,$80,$80,$06,$06,$0E,$06,$06,$06,$06,$06,$80,$80,$80,$80
+00E866  2  06 06 0E 06  
+00E86A  2  06 06 06 06  
+00E872  2  80 80 80 80          .byte $80,$80,$80,$80,$06,$06,$06,$06,$06,$06,$06,$06,$80,$80,$80,$80
+00E876  2  06 06 06 06  
+00E87A  2  06 06 06 06  
+00E882  2  80 80 80 80          .byte $80,$80,$80,$80,$06,$06,$06,$06,$06,$06,$06,$06,$80,$80,$80,$80
+00E886  2  06 06 06 06  
+00E88A  2  06 06 06 06  
+00E892  2  80 80 80 80          .byte $80,$80,$80,$80,$06,$06,$06,$06,$06,$06,$06,$06,$80,$80,$80,$80
+00E896  2  06 06 06 06  
+00E89A  2  06 06 06 06  
+00E8A2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$06,$06,$06,$06,$06,$06,$80,$80,$80,$80,$80
+00E8A6  2  80 06 06 06  
+00E8AA  2  06 06 06 80  
+00E8B2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$06,$06,$06,$06,$06,$06,$80,$80,$80,$80,$80
+00E8B6  2  80 06 06 06  
+00E8BA  2  06 06 06 80  
+00E8C2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$06,$06,$06,$06,$06,$06,$80,$80,$80,$80,$80
+00E8C6  2  80 06 06 06  
+00E8CA  2  06 06 06 80  
+00E8D2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$06,$06,$06,$06,$80,$80,$80,$80,$80,$80
+00E8D6  2  80 80 06 06  
+00E8DA  2  06 06 80 80  
+00E8E2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$06,$06,$80,$80,$80,$80,$80,$80,$80
+00E8E6  2  80 80 80 06  
+00E8EA  2  06 80 80 80  
+00E8F2  2               ; image 4
+00E8F2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E8F6  2  80 80 80 80  
+00E8FA  2  80 80 80 80  
+00E902  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E906  2  80 80 80 80  
+00E90A  2  80 80 80 80  
+00E912  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E916  2  80 80 80 80  
+00E91A  2  80 80 80 80  
+00E922  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E926  2  80 80 80 80  
+00E92A  2  80 80 80 80  
+00E932  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E936  2  80 80 80 80  
+00E93A  2  80 80 80 80  
+00E942  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E946  2  80 80 80 80  
+00E94A  2  80 80 80 80  
+00E952  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E956  2  80 80 80 80  
+00E95A  2  80 80 80 80  
+00E962  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E966  2  80 80 80 80  
+00E96A  2  80 80 80 80  
+00E972  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E976  2  80 80 80 80  
+00E97A  2  80 80 80 80  
+00E982  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E986  2  80 80 80 80  
+00E98A  2  80 80 80 80  
+00E992  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E996  2  80 80 80 80  
+00E99A  2  80 80 80 80  
+00E9A2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E9A6  2  80 80 80 80  
+00E9AA  2  80 80 80 80  
+00E9B2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E9B6  2  80 80 80 80  
+00E9BA  2  80 80 80 80  
+00E9C2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$00,$00,$00,$00,$00,$00,$80,$80,$80,$80,$80
+00E9C6  2  80 00 00 00  
+00E9CA  2  00 00 00 80  
+00E9D2  2  80 80 80 80          .byte $80,$80,$80,$80,$00,$00,$00,$00,$00,$00,$00,$00,$80,$80,$80,$80
+00E9D6  2  00 00 00 00  
+00E9DA  2  00 00 00 00  
+00E9E2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$00,$00,$00,$00,$00,$00,$80,$80,$80,$80,$80
+00E9E6  2  80 00 00 00  
+00E9EA  2  00 00 00 80  
+00E9F2  2               ; image 5
+00E9F2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$1E,$1E,$80,$80,$80,$80,$80,$80,$80
+00E9F6  2  80 80 80 1E  
+00E9FA  2  1E 80 80 80  
+00EA02  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$1E,$1E,$1E,$1E,$80,$80,$80,$80,$80,$80
+00EA06  2  80 80 1E 1E  
+00EA0A  2  1E 1E 80 80  
+00EA12  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$1E,$1E,$1E,$1E,$1E,$1E,$80,$80,$80,$80,$80
+00EA16  2  80 1E 1E 1E  
+00EA1A  2  1E 1E 1E 80  
+00EA22  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$1E,$0E,$1E,$1E,$1E,$1E,$80,$80,$80,$80,$80
+00EA26  2  80 1E 0E 1E  
+00EA2A  2  1E 1E 1E 80  
+00EA32  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$0E,$0F,$0E,$1E,$1E,$1E,$80,$80,$80,$80,$80
+00EA36  2  80 0E 0F 0E  
+00EA3A  2  1E 1E 1E 80  
+00EA42  2  80 80 80 80          .byte $80,$80,$80,$80,$1E,$0E,$0E,$0E,$1E,$1E,$1E,$1E,$80,$80,$80,$80
+00EA46  2  1E 0E 0E 0E  
+00EA4A  2  1E 1E 1E 1E  
+00EA52  2  80 80 80 80          .byte $80,$80,$80,$80,$1E,$0E,$0E,$0E,$1E,$1E,$1E,$1E,$80,$80,$80,$80
+00EA56  2  1E 0E 0E 0E  
+00EA5A  2  1E 1E 1E 1E  
+00EA62  2  80 80 80 80          .byte $80,$80,$80,$80,$1E,$1E,$0E,$1E,$1E,$1E,$1E,$1E,$80,$80,$80,$80
+00EA66  2  1E 1E 0E 1E  
+00EA6A  2  1E 1E 1E 1E  
+00EA72  2  80 80 80 80          .byte $80,$80,$80,$80,$1E,$1E,$1E,$1E,$1E,$1E,$1E,$1E,$80,$80,$80,$80
+00EA76  2  1E 1E 1E 1E  
+00EA7A  2  1E 1E 1E 1E  
+00EA82  2  80 80 80 80          .byte $80,$80,$80,$80,$1E,$1E,$1E,$1E,$1E,$1E,$1E,$1E,$80,$80,$80,$80
+00EA86  2  1E 1E 1E 1E  
+00EA8A  2  1E 1E 1E 1E  
+00EA92  2  80 80 80 80          .byte $80,$80,$80,$80,$1E,$1E,$1E,$1E,$1E,$1E,$1E,$1E,$80,$80,$80,$80
+00EA96  2  1E 1E 1E 1E  
+00EA9A  2  1E 1E 1E 1E  
+00EAA2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$1E,$1E,$1E,$1E,$1E,$1E,$80,$80,$80,$80,$80
+00EAA6  2  80 1E 1E 1E  
+00EAAA  2  1E 1E 1E 80  
+00EAB2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$1E,$1E,$1E,$1E,$1E,$1E,$80,$80,$80,$80,$80
+00EAB6  2  80 1E 1E 1E  
+00EABA  2  1E 1E 1E 80  
+00EAC2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$1E,$1E,$1E,$1E,$1E,$1E,$80,$80,$80,$80,$80
+00EAC6  2  80 1E 1E 1E  
+00EACA  2  1E 1E 1E 80  
+00EAD2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$1E,$1E,$1E,$1E,$80,$80,$80,$80,$80,$80
+00EAD6  2  80 80 1E 1E  
+00EADA  2  1E 1E 80 80  
+00EAE2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$1E,$1E,$80,$80,$80,$80,$80,$80,$80
+00EAE6  2  80 80 80 1E  
+00EAEA  2  1E 80 80 80  
+00EAF2  2               ; image 6
+00EAF2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EAF6  2  80 80 80 80  
+00EAFA  2  80 80 80 80  
+00EB02  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$0F,$80,$80,$80,$80,$80,$80,$80
+00EB06  2  80 80 80 80  
+00EB0A  2  0F 80 80 80  
+00EB12  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$0F,$0F,$0F,$0F,$0F,$80,$80,$80,$80,$80
+00EB16  2  80 80 0F 0F  
+00EB1A  2  0F 0F 0F 80  
+00EB22  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$80,$80,$80,$80
+00EB26  2  80 0F 0F 0F  
+00EB2A  2  0F 0F 0F 0F  
+00EB32  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$80,$80
+00EB36  2  80 0F 0F 0F  
+00EB3A  2  0F 0F 0F 0F  
+00EB42  2  80 80 80 0F          .byte $80,$80,$80,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$80
+00EB46  2  0F 0F 0F 0F  
+00EB4A  2  0F 0F 0F 0F  
+00EB52  2  80 80 0F 0F          .byte $80,$80,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$80
+00EB56  2  0F 0F 0F 0F  
+00EB5A  2  0F 0F 0F 0F  
+00EB62  2  80 0F 0F 0F          .byte $80,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$80
+00EB66  2  0F 0F 0F 0F  
+00EB6A  2  0F 0F 0F 0F  
+00EB72  2  80 0F 0F 0F          .byte $80,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$16
+00EB76  2  0F 0F 0F 0F  
+00EB7A  2  0F 0F 0F 0F  
+00EB82  2  80 0F 0F 0F          .byte $80,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$80
+00EB86  2  0F 0F 0F 0F  
+00EB8A  2  0F 0F 0F 0F  
+00EB92  2  80 0F 0F 0F          .byte $80,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$80
+00EB96  2  0F 0F 0F 0F  
+00EB9A  2  0F 0F 0F 0F  
+00EBA2  2  80 16 0F 0F          .byte $80,$16,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$0F,$16,$80
+00EBA6  2  0F 0F 0F 0F  
+00EBAA  2  0F 0F 0F 0F  
+00EBB2  2  80 80 16 0F          .byte $80,$80,$16,$0F,$0F,$0F,$0F,$0F,$16,$16,$0F,$16,$16,$16,$80,$80
+00EBB6  2  0F 0F 0F 0F  
+00EBBA  2  16 16 0F 16  
+00EBC2  2  80 80 80 16          .byte $80,$80,$80,$16,$16,$16,$16,$16,$80,$80,$16,$80,$80,$80,$80,$80
+00EBC6  2  16 16 16 16  
+00EBCA  2  80 80 16 80  
+00EBD2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EBD6  2  80 80 80 80  
+00EBDA  2  80 80 80 80  
+00EBE2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EBE6  2  80 80 80 80  
+00EBEA  2  80 80 80 80  
+00EBF2  2               ; image 7
+00EBF2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EBF6  2  80 80 80 80  
+00EBFA  2  80 80 80 80  
+00EC02  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EC06  2  80 80 80 80  
+00EC0A  2  80 80 80 80  
+00EC12  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EC16  2  80 80 80 80  
+00EC1A  2  80 80 80 80  
+00EC22  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EC26  2  80 80 80 80  
+00EC2A  2  80 80 80 80  
+00EC32  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EC36  2  80 80 80 80  
+00EC3A  2  80 80 80 80  
+00EC42  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00EC46  2  80 80 80 80  
+00EC4A  2  80 80 80 80  
+00EC52  2  80 80 80 00          .byte $80,$80,$80,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$80,$80,$80
+00EC56  2  00 00 00 00  
+00EC5A  2  00 00 00 00  
+00EC62  2  80 00 00 00          .byte $80,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$80
+00EC66  2  00 00 00 00  
+00EC6A  2  00 00 00 00  
+00EC72  2  00 00 00 00          .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+00EC76  2  00 00 00 00  
+00EC7A  2  00 00 00 00  
+00EC82  2  80 00 00 00          .byte $80,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$80
+00EC86  2  00 00 00 00  
+00EC8A  2  00 00 00 00  
+00EC92  2  80 80 80 00          .byte $80,$80,$80,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$80,$80,$80
+00EC96  2  00 00 00 00  
+00EC9A  2  00 00 00 00  
+00ECA2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00ECA6  2  80 80 80 80  
+00ECAA  2  80 80 80 80  
+00ECB2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00ECB6  2  80 80 80 80  
+00ECBA  2  80 80 80 80  
+00ECC2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00ECC6  2  80 80 80 80  
+00ECCA  2  80 80 80 80  
+00ECD2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00ECD6  2  80 80 80 80  
+00ECDA  2  80 80 80 80  
+00ECE2  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00ECE6  2  80 80 80 80  
+00ECEA  2  80 80 80 80  
+00ECF2  2               
+00ECF2  1               images_end:
+00ECF2  1               

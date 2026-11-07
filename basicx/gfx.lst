@@ -1,0 +1,1238 @@
+ca65 V2.19 - Git 52727a5
+Main file   : gfx.asm
+Current file: gfx.asm
+
+000000r 1               ; gfx.asm - GFX, the mini6502 BASIC extension for graphics, sound and the
+000000r 1               ; mouse (bank $00). See README.txt.
+000000r 1               ; Part of mini6502 BASIC, derived from EhBASIC (c) Lee Davison: free for
+000000r 1               ; personal, non-commercial use only (see basic/README.txt).
+000000r 1               ; mini6502 additions Copyright (C) 2026 Benoit Colson, with the help of Claude AI.
+000000r 1               ;
+000000r 1               ;   L GFX E000 00     then start BASIC (A000R), or G / A003R back into it
+000000r 1               ; Commands (each starts with "!"; numbers are any expressions):
+000000r 1               ;   !SCREEN m               0 text, 1 graphics, 2 graphics + text, 3 hires,
+000000r 1               ;                           4 hires + text
+000000r 1               ;   !CLG [c]                clear the drawing page (colour c, else 0)
+000000r 1               ;   !COLOR c                the colour PLOT, LINE, BOX, FILL use (lores: a
+000000r 1               ;                           pixel byte 0-63; hires: 1 ink, 0 paper)
+000000r 1               ;   !PLOT x,y               a point
+000000r 1               ;   !LINE x0,y0,x1,y1       a line
+000000r 1               ;   !BOX x0,y0,x1,y1        a rectangle
+000000r 1               ;   !FILL x0,y0,x1,y1       a filled rectangle
+000000r 1               ;   !PIXEL x,y,V            V = the pixel at x,y
+000000r 1               ;   !PALETTE i,r,g,b        palette entry i (0-31) = r,g,b (0-255)
+000000r 1               ;   !PAGE show[,draw]       the page shown (and the one drawn on), 0-1
+000000r 1               ;   !SPRITE n,x,y[,i[,f]]   sprite n (0-31) at x,y (screen pixels), image i,
+000000r 1               ;                           flags f (1 on, 2 flip across, 4 flip down, 8
+000000r 1               ;                           double, 16 behind, 32 shadow); it is switched on
+000000r 1               ;   !SPROFF n               sprite n off
+000000r 1               ;   !SPRDEF n,a             sprite image n = the 256 bytes at address a
+000000r 1               ;   !SOUND v,n[,vol[,w[,d]]]  voice v (1-4) plays note n (0 = off): volume
+000000r 1               ;                           0-15, wave 0-3, duration in frames (0 = held)
+000000r 1               ;   !SHAPE v,decay[,sweep[,pulse]]  voice v's shaping
+000000r 1               ;   !QUIET                  all four voices off
+000000r 1               ;   !MUSIC b                the music engine plays the song in bank b
+000000r 1               ;                           (0 = stop)
+000000r 1               ;   !MOUSE X,Y,B            X,Y = where the mouse is (text: column, row;
+000000r 1               ;                           graphics: 160 x 200; hires: 640 x 400), B = its
+000000r 1               ;                           buttons (1 left, 2 right, 4 middle)
+000000r 1               ;   !WAIT n                 wait n frames (1/60 s each)
+000000r 1               ;   !POINTER n              the mouse pointer: 1 on, 0 off
+000000r 1               ;   !BLOAD "name",a[,b]     load a file at address a (with bank b at $E000)
+000000r 1               ;   !BSAVE "name",a,e[,b]   save a..e (end included), with bank b
+000000r 1               ;   !HELP                   list these commands
+000000r 1               ;   !FLUSH                  throw away the keys waiting to be read
+000000r 1               ; Functions (in expressions, e.g. X=!MOUSEX or IF !BUTTONS AND 1 THEN ...):
+000000r 1               ;   !MOUSEX  !MOUSEY        where the mouse is (units as for !MOUSE)
+000000r 1               ;   !BUTTONS                the buttons held (1 left, 2 right, 4 middle)
+000000r 1               ;   !CLICKS                 the buttons pressed since the last !CLICKS
+000000r 1               ;   !FRAME                  the frame counter (0-255, +1 every 1/60 s)
+000000r 1               ;   !PIXEL(x,y)             the pixel at x,y
+000000r 1               ;   !KEYDOWN("W")           -1 while that key is held down, else 0 (several
+000000r 1               ;   !KEYDOWN(code)          at once, no auto-repeat; codes: see KEYSEL);
+000000r 1               ;                           it also throws away the keys waiting to be read
+000000r 1               ;                           (but not a Ctrl-C), as !FLUSH
+000000r 1               ;   !KEYAT("W")            the same for the key in a PLACE, whatever the
+000000r 1               ;   !KEYAT(scancode)       layout: "W" = where W is on a US keyboard (Z on
+000000r 1               ;                           AZERTY), or a PC scancode (see KEYPOS)
+000000r 1               
+000000r 1                       .include "mini6502.inc"
+000000r 2               ; mini6502.inc - made by hw/gen.py from hw/mini6502.def: edit that, not this.
+000000r 2               ; Copyright (C) 2026 Benoit Colson, with the help of Claude AI; GNU GPL 3 or later (COPYING).
+000000r 2               ; The mini6502's registers, banks, far-call entries and system calls.
+000000r 2               ; In a program: .include "mini6502.inc" (ca65 -I path/to/hw). Including it
+000000r 2               ; twice is fine.
+000000r 2               
+000000r 2               .ifndef MINI6502_INC
+000000r 2               MINI6502_INC = 1
+000000r 2               
+000000r 2               ; registers
+000000r 2               SYSCTL      = $D000   ; read/write
+000000r 2               FRAME       = $D001   ; read
+000000r 2               WARMLO      = $D002   ; read/write
+000000r 2               WARMHI      = $D003   ; read/write
+000000r 2               CLOCKH      = $D004   ; read
+000000r 2               CLOCKM      = $D005   ; read
+000000r 2               CLOCKS      = $D006   ; read
+000000r 2               IRQEN       = $D007   ; read/write
+000000r 2               IRQFLAGS    = $D008   ; read
+000000r 2               IRQBANK     = $D009   ; read/write
+000000r 2               IRQVEC      = $D00A   ; read/write, 2 bytes
+000000r 2               KBD         = $D010   ; read
+000000r 2               KBDCR       = $D011   ; read
+000000r 2               DSP         = $D012   ; write
+000000r 2               DSPCR       = $D013   ; reads 0
+000000r 2               KBDPEEK     = $D014   ; read
+000000r 2               CURX        = $D015   ; read/write
+000000r 2               CURY        = $D016   ; read/write
+000000r 2               VCHR        = $D017   ; read/write
+000000r 2               VCOL        = $D018   ; read/write
+000000r 2               KBDEXT      = $D019   ; read
+000000r 2               KEYSEL      = $D01A   ; read/write
+000000r 2               KEYHELD     = $D01B   ; read
+000000r 2               KEYPOS      = $D01C   ; read/write
+000000r 2               POSHELD     = $D01D   ; read
+000000r 2               BANK        = $D020   ; read/write
+000000r 2               COLOR       = $D021   ; read/write
+000000r 2               SND         = $D030   ; read/write, 16 bytes
+000000r 2               V1          = $D030   ; read/write, 4 bytes
+000000r 2               V2          = $D034   ; read/write, 4 bytes
+000000r 2               V3          = $D038   ; read/write, 4 bytes
+000000r 2               V4          = $D03C   ; read/write, 4 bytes
+000000r 2               SHP         = $D050   ; read/write, 16 bytes
+000000r 2               S1          = $D050   ; read/write, 4 bytes
+000000r 2               S2          = $D054   ; read/write, 4 bytes
+000000r 2               S3          = $D058   ; read/write, 4 bytes
+000000r 2               S4          = $D05C   ; read/write, 4 bytes
+000000r 2               BEEP        = $D100   ; read/write
+000000r 2               DCMD        = $D040   ; read/write
+000000r 2               DSTAT       = $D041   ; read/write
+000000r 2               DSTART      = $D042   ; read/write, 2 bytes
+000000r 2               DEND        = $D044   ; read/write, 2 bytes
+000000r 2               DNAME       = $D046   ; read/write, 2 bytes
+000000r 2               DNLEN       = $D048   ; read/write
+000000r 2               PADR        = $D200   ; read/write, 3 bytes
+000000r 2               PDATA       = $D203   ; read/write
+000000r 2               PSTEP       = $D204   ; read/write
+000000r 2               PBADR       = $D208   ; read/write, 3 bytes
+000000r 2               PBDATA      = $D20B   ; read/write
+000000r 2               PBSTEP      = $D20C   ; read/write
+000000r 2               DMASRC      = $D210   ; read/write, 3 bytes
+000000r 2               DMADST      = $D213   ; read/write, 3 bytes
+000000r 2               DMALEN      = $D216   ; read/write, 3 bytes
+000000r 2               DMACMD      = $D219   ; read/write
+000000r 2               DMAFILL     = $D21A   ; read/write
+000000r 2               DMASTAT     = $D21B   ; read
+000000r 2               VID         = $D300   ; read/write, 64 bytes
+000000r 2               MODE        = $D300   ; read/write
+000000r 2               SHOW        = $D301   ; read/write
+000000r 2               DRAW        = $D302   ; read/write
+000000r 2               INTENS      = $D303   ; read/write
+000000r 2               MASTER      = $D304   ; read/write
+000000r 2               TRANSP      = $D305   ; read/write
+000000r 2               INK         = $D306   ; read/write
+000000r 2               PAPER       = $D307   ; read/write
+000000r 2               PALIDX      = $D308   ; read/write
+000000r 2               PALR        = $D309   ; read/write
+000000r 2               PALG        = $D30A   ; read/write
+000000r 2               PALB        = $D30B   ; read/write
+000000r 2               BX0         = $D310   ; read/write
+000000r 2               BY0         = $D311   ; read/write
+000000r 2               BX1         = $D312   ; read/write
+000000r 2               BY1         = $D313   ; read/write
+000000r 2               BCOL        = $D314   ; read/write
+000000r 2               BDX         = $D315   ; read/write
+000000r 2               BDY         = $D316   ; read/write
+000000r 2               BSRC        = $D317   ; read/write
+000000r 2               BCMD        = $D318   ; read/write
+000000r 2               BPIXEL      = $D319   ; read
+000000r 2               BX0H        = $D31A   ; read/write
+000000r 2               BY0H        = $D31B   ; read/write
+000000r 2               BX1H        = $D31C   ; read/write
+000000r 2               BY1H        = $D31D   ; read/write
+000000r 2               BDXH        = $D31E   ; read/write
+000000r 2               BDYH        = $D31F   ; read/write
+000000r 2               COLLSS      = $D320   ; read, 4 bytes
+000000r 2               COLLBG      = $D324   ; read, 4 bytes
+000000r 2               ROP         = $D328   ; read/write
+000000r 2               PATON       = $D329   ; read/write
+000000r 2               CHR         = $D32A   ; read/write
+000000r 2               STYLE       = $D32B   ; read/write
+000000r 2               CHOUT       = $D32C   ; read/write
+000000r 2               PATTERN     = $D330   ; read/write, 8 bytes
+000000r 2               CLIPR       = $D338   ; read/write, 8 bytes
+000000r 2               SPR         = $D400   ; read/write, 256 bytes
+000000r 2               MOUSEX      = $D500   ; read, 2 bytes
+000000r 2               MOUSEY      = $D502   ; read, 2 bytes
+000000r 2               BUTTONS     = $D504   ; read
+000000r 2               WHEEL       = $D505   ; read
+000000r 2               CLICKS      = $D506   ; read
+000000r 2               PTR         = $D508   ; read/write
+000000r 2               PTRX        = $D509   ; read/write, 2 bytes
+000000r 2               PTRY        = $D50B   ; read/write, 2 bytes
+000000r 2               HOTX        = $D50D   ; read/write
+000000r 2               HOTY        = $D50E   ; read/write
+000000r 2               PTRIMG      = $D510   ; read/write, 32 bytes
+000000r 2               PTRMASK     = $D530   ; read/write, 32 bytes
+000000r 2               MOUSELX     = $D550   ; read
+000000r 2               MOUSELY     = $D551   ; read
+000000r 2               MOUSECOL    = $D552   ; read
+000000r 2               MOUSEROW    = $D553   ; read
+000000r 2               ; numbers
+000000r 2               IRQ_FRAME   = 1
+000000r 2               IRQ_KEY     = 2
+000000r 2               IRQ_MOUSE   = 4
+000000r 2               V_NOTE      = 0
+000000r 2               V_VOL       = 1
+000000r 2               V_WAVE      = 2
+000000r 2               V_DUR       = 3
+000000r 2               S_DECAY     = 0
+000000r 2               S_SWEEP     = 1
+000000r 2               S_PULSE     = 2
+000000r 2               S_BEND      = 3
+000000r 2               C_CLEAR     = 1
+000000r 2               C_PSET      = 2
+000000r 2               C_LINE      = 3
+000000r 2               C_BOX       = 4
+000000r 2               C_BOXF      = 5
+000000r 2               C_COPY      = 6
+000000r 2               C_COPYT     = 7
+000000r 2               C_DIM       = 8
+000000r 2               C_UNDIM     = 9
+000000r 2               C_STAMP     = $0A
+000000r 2               C_CHAR      = $0B
+000000r 2               VTAB        = $CC00
+000000r 2               VTCOUNT     = $CC02
+000000r 2               VTENTRY     = $CC08
+000000r 2               VTMAX       = $28
+000000r 2               VTNAMES     = $CD48
+000000r 2               BANKMAP     = $CF00
+000000r 2               FARCALL     = $FFD0
+000000r 2               ; bank zones (first, last)
+000000r 2               Z_BASICEXT  = 0       ; BASIC extensions, "!" commands (basicx/README.txt)
+000000r 2               Z_BASICEXT_END= 7
+000000r 2               Z_USER      = 8       ; yours: load by hand; never handed out
+000000r 2               Z_USER_END  = $0F
+000000r 2               Z_SYSTEM    = $10     ; the system's programs
+000000r 2               Z_SYSTEM_END= $1F
+000000r 2               Z_PROGRAMS  = $20     ; programs (the allocator hands these out)
+000000r 2               Z_PROGRAMS_END= $7F
+000000r 2               Z_DOCUMENTS = $80     ; documents, songs, data (handed out too)
+000000r 2               Z_DOCUMENTS_END= $BF
+000000r 2               Z_SWAP      = $C0     ; the fixed RAM's copies while programs swap it
+000000r 2               Z_SWAP_END  = $FF
+000000r 2               ; fixed banks
+000000r 2               B_GFX       = 0       ; the BASIC extension GFX: !commands (DESKTOP.TXT loads it)
+000000r 2               B_LULLABY   = 8       ; the lullaby demo (BOOT.TXT loads it)
+000000r 2               B_TK1       = $10     ; the toolkit, part 1 (TK1)
+000000r 2               B_TK2       = $11     ; the toolkit, part 2 (TK2)
+000000r 2               B_MUSIC     = $12     ; the music engine (MUSIC)
+000000r 2               B_EDIT      = $13     ; the editor (EDIT)
+000000r 2               B_DESK1     = $14     ; the desktop, part 1 (DESK1)
+000000r 2               B_DESK2     = $15     ; the desktop, part 2 (DESK2)
+000000r 2               B_DESK3     = $16     ; the desktop, part 3: icons (DESK3)
+000000r 2               B_LAUNCH    = $20     ; where the desktop loads bank programs
+000000r 2               B_DESKSAVE  = $C0     ; the desktop's RAM while a program runs
+000000r 2               B_TKSWAP    = $D0     ; the caller's RAM while a toolkit program runs
+000000r 2               B_EDITIMG   = $E0     ; the editor's RAM while away
+000000r 2               B_EDITWORLD = $F0     ; the caller's RAM while editing
+000000r 2               ; far-call entries: E_NAME = its address (JSR E_NAME), EN_NAME = its number
+000000r 2               E_LULLABY   = $CC08   ; plays the lullaby
+000000r 2               EN_LULLABY  = 0
+000000r 2               E_EDITNEW   = $CC10   ; the editor, with an empty text
+000000r 2               EN_EDITNEW  = 1
+000000r 2               E_EDIT      = $CC18   ; the editor, with the text as it was (BASIC: CALL EDIT)
+000000r 2               EN_EDIT     = 2
+000000r 2               E_TOOLKIT   = $CC88   ; the toolkit: LDA #function, JSR
+000000r 2               EN_TOOLKIT  = $10
+000000r 2               E_DESKTOP   = $CC90   ; the desktop (BASIC: CALL DESKTOP)
+000000r 2               EN_DESKTOP  = $11
+000000r 2               E_MUSIC     = $CCD0   ; the music engine: LDA #function, LDX #arg, JSR
+000000r 2               EN_MUSIC    = $19
+000000r 2               E_MUSICB    = $CCD8   ; the music engine from BASIC (mailbox $CCDE)
+000000r 2               EN_MUSICB   = $1A
+000000r 2               E_RESUME    = $CC98   ; the desktop: back from a program (G after F1)
+000000r 2               EN_RESUME   = $12
+000000r 2               E_LAUNCH    = $CCA0   ; the desktop: calls a program, then RESUME
+000000r 2               EN_LAUNCH   = $13
+000000r 2               E_TARGET    = $CCB0   ; the desktop: the program being started
+000000r 2               EN_TARGET   = $15
+000000r 2               E_BANKLD    = $CCB8   ; the desktop: disk LOAD into the launch bank
+000000r 2               EN_BANKLD   = $16
+000000r 2               ; bank map owners
+000000r 2               OWN_FREE    = 0       ; free
+000000r 2               OWN_MAIN    = $FD     ; a main-RAM program (started from the desktop)
+000000r 2               OWN_HAND    = $FE     ; loaded by hand (L ... BB in the monitor)
+000000r 2               OWN_SYSTEM  = $FF     ; reserved: zones and banks that are never handed out
+000000r 2               ; system calls in the ROM
+000000r 2               BALLOC      = $FFB0   ; A = owner, X = how many banks (next to each other), Y = 0 pr
+000000r 2               BFREE       = $FFB3   ; A = bank
+000000r 2               BFREEALL    = $FFB6   ; A = owner
+000000r 2               BCLAIM      = $FFB9   ; A = owner, X = bank
+000000r 2               VFIND       = $FFBC   ; X/Y = address of a name (low, high; up to 8 characters, endi
+000000r 2               BOWNER      = $FFBF   ; A = bank
+000000r 2               
+000000r 2               .endif
+000000r 2               
+000000r 1                       .include "bx.inc"
+000000r 2               ; bx.inc - for writing mini6502 BASIC extensions
+000000r 2               ; Part of mini6502 BASIC, derived from EhBASIC (c) Lee Davison: free for
+000000r 2               ; personal, non-commercial use only (see basic/README.txt).
+000000r 2               ; mini6502 additions Copyright (C) 2026 Benoit Colson, with the help of Claude AI.
+000000r 2               ; An extension is a 4K bank image for one of banks $00-$07:
+000000r 2               ;   $E000  "BX", version (1)
+000000r 2               ;   $E003  JMP statement  a "!" statement: A = its first character after
+000000r 2               ;                         the "!", the line pointer on it. Your keyword:
+000000r 2               ;                         run it, return with carry clear (the line pointer
+000000r 2               ;                         at the end of the statement). Not yours: carry
+000000r 2               ;                         set and the line pointer untouched.
+000000r 2               ;   $E006  JMP init       called at every BASIC cold and warm start
+000000r 2               ;   $E009  JMP function   a "!" in an expression: the same, but return its
+000000r 2               ;                         value in Y (low) / A (high), signed, carry clear
+000000r 2               ;                         (no functions: SEC, RTS)
+000000r 2               ;   $E00C  your name, 0
+000000r 2               ; BASIC's own zero page is busy; $F0-$F7 belong to bxmatch.inc, $F8-$FF are
+000000r 2               ; yours. Errors (yours or BASIC's) put the program's bank back by themselves.
+000000r 2               
+000000r 2               ; the API (fixed addresses in BASIC)
+000000r 2               XCHRGET  = $A009        ; next character of the line: A (Z set at ":" / end)
+000000r 2               XCHRGOT  = $A00C        ; the current character again
+000000r 2               XGETBYTE = $A00F        ; a 0-255 expression: X (A = the character after)
+000000r 2               XCOMMA   = $A012        ; a "," (else Syntax error)
+000000r 2               XGETWORD = $A015        ; a numeric expression: its low 16 bits in Itempl/h
+000000r 2               XGETSTR  = $A018        ; a string expression: A = length, X/Y = its address
+000000r 2               XGETVAR  = $A01B        ; the numeric variable named here: XSETVAR sets it
+000000r 2               XSETVAR  = $A01E        ; that variable = Y (low) / A (high), signed
+000000r 2               XERROR   = $A021        ; error X (ERR_ below), then Ready
+000000r 2               XKEYT    = $A024        ; (2 bytes) BASIC's keyword table, for bxmatch.inc
+000000r 2               XDISK    = $A027        ; disk command A with bank X selected meanwhile;
+000000r 2                                       ; a failure gives BASIC's disk error message
+000000r 2               XPRINT   = $A02A        ; print the character A
+000000r 2               XCRLF    = $A02D        ; new line
+000000r 2               XGETNUM  = $A030        ; a numeric expression into FAC1
+000000r 2               XSYNTAX  = $A033        ; Syntax error
+000000r 2               XFUNC    = $A036        ; Function call error (a value out of range)
+000000r 2               
+000000r 2               ; BASIC's zero page and RAM that extensions may use
+000000r 2               Bpntrl   = $C3          ; the line pointer (2 bytes)
+000000r 2               Bpntrh   = $C4
+000000r 2               Itempl   = $11          ; XGETWORD's result (2 bytes)
+000000r 2               Itemph   = $12
+000000r 2               TPos     = $0E          ; the terminal column BASIC thinks the cursor is in
+000000r 2               XBANK    = $0311        ; the bank the program had selected
+000000r 2               
+000000r 2               ; error codes for XERROR
+000000r 2               ERR_SN   = $02          ; Syntax
+000000r 2               ERR_FC   = $08          ; Function call
+000000r 2               ERR_OV   = $0A          ; Overflow
+000000r 2               ERR_OM   = $0C          ; Out of memory
+000000r 2               ERR_TM   = $18          ; Type mismatch
+000000r 2               
+000000r 1               
+000000r 1               PTRA    = $F8           ; 2: a pointer (SPRDEF)
+000000r 1               T0      = $FA           ; scratch
+000000r 1               T1      = $FB
+000000r 1               T2      = $FC
+000000r 1               T3      = $FD           ; (functions only)
+000000r 1               T4      = $FE
+000000r 1               
+000000r 1                       .org $E000
+00E000  1  42 58 01             .byte "BX", 1
+00E003  1  4C 16 E0             jmp statement           ; $E003
+00E006  1  4C 10 E0             jmp init                ; $E006
+00E009  1  4C 2B E0             jmp function            ; $E009
+00E00C  1  47 46 58 00          .byte "GFX", 0          ; $E00C
+00E010  1               
+00E010  1  A9 01        init:   lda #1
+00E012  1  8D 7D E3             sta PEN
+00E015  1  60                   rts
+00E016  1               
+00E016  1               statement:
+00E016  1  A2 06                ldx #<keywords
+00E018  1  A0 E3                ldy #>keywords
+00E01A  1  20 15 E2             jsr XMATCH
+00E01D  1  B0 0B                bcs @no                 ; not ours
+00E01F  1  0A                   asl
+00E020  1  AA                   tax
+00E021  1  BD D7 E2             lda cmds+1,x            ; run it (RTS goes to @done)
+00E024  1  48                   pha
+00E025  1  BD D6 E2             lda cmds,x
+00E028  1  48                   pha
+00E029  1  60                   rts
+00E02A  1  60           @no:    rts
+00E02B  1               
+00E02B  1               ; a function: its value in Y (low) / A (high), carry clear
+00E02B  1               function:
+00E02B  1  A2 4F                ldx #<fwords
+00E02D  1  A0 E0                ldy #>fwords
+00E02F  1  20 15 E2             jsr XMATCH
+00E032  1  B0 0A                bcs @no
+00E034  1  0A                   asl
+00E035  1  AA                   tax
+00E036  1  BD 40 E0             lda fcmds+1,x
+00E039  1  48                   pha
+00E03A  1  BD 3F E0             lda fcmds,x
+00E03D  1  48                   pha
+00E03E  1  60           @no:    rts
+00E03F  1               
+00E03F  1  7E E0 83 E0  fcmds:  .word f_mousex-1, f_mousey-1, f_buttons-1, f_clicks-1, f_frame-1
+00E043  1  88 E0 8E E0  
+00E047  1  94 E0        
+00E049  1  9B E0 05 E1          .word f_pixel-1, f_keydown-1, f_keyat-1
+00E04D  1  50 E1        
+00E04F  1  4D 4F 55 53  fwords: .byte "MOUSE", 'X'+$80, "MOUSE", 'Y'+$80, "BUTTON", 'S'+$80
+00E053  1  45 D8 4D 4F  
+00E057  1  55 53 45 D9  
+00E062  1  43 4C 49 43          .byte "CLICK", 'S'+$80, "FRAM", 'E'+$80, "PIXE", 'L'+$80
+00E066  1  4B D3 46 52  
+00E06A  1  41 4D C5 50  
+00E072  1  4B 45 59 44          .byte "KEYDOW", 'N'+$80, "KEYA", 'T'+$80
+00E076  1  4F 57 CE 4B  
+00E07A  1  45 59 41 D4  
+00E07E  1  00                   .byte 0
+00E07F  1               
+00E07F  1               f_mousex:
+00E07F  1  20 DB E1             jsr mousex
+00E082  1  18                   clc
+00E083  1  60                   rts
+00E084  1               f_mousey:
+00E084  1  20 F7 E1             jsr mousey
+00E087  1  18                   clc
+00E088  1  60                   rts
+00E089  1               f_buttons:
+00E089  1  AC 04 D5             ldy BUTTONS
+00E08C  1  4C 98 E0             jmp byteval
+00E08F  1               f_clicks:
+00E08F  1  AC 06 D5             ldy CLICKS
+00E092  1  4C 98 E0             jmp byteval
+00E095  1               f_frame:
+00E095  1  AC 01 D0             ldy FRAME
+00E098  1               byteval:
+00E098  1  A9 00                lda #0
+00E09A  1  18                   clc
+00E09B  1  60                   rts
+00E09C  1               ; (the blitter's X0/Y0 are put back: a command may be halfway through
+00E09C  1               ; setting them up, as in !PLOT 5,!PIXEL(1,1))
+00E09C  1               f_pixel:
+00E09C  1  20 0C A0             jsr XCHRGOT             ; (x,y)
+00E09F  1  C9 28                cmp #'('
+00E0A1  1  D0 60                bne @bad
+00E0A3  1  20 09 A0             jsr XCHRGET
+00E0A6  1  20 15 A0             jsr XGETWORD            ; x, kept on the stack
+00E0A9  1  A5 11                lda Itempl
+00E0AB  1  48                   pha
+00E0AC  1  A5 12                lda Itemph
+00E0AE  1  48                   pha
+00E0AF  1  20 12 A0             jsr XCOMMA
+00E0B2  1  20 15 A0             jsr XGETWORD            ; y
+00E0B5  1  20 0C A0             jsr XCHRGOT
+00E0B8  1  C9 29                cmp #')'
+00E0BA  1  D0 47                bne @bad
+00E0BC  1  20 09 A0             jsr XCHRGET
+00E0BF  1  68                   pla
+00E0C0  1  85 FE                sta T4
+00E0C2  1  68                   pla
+00E0C3  1  85 FD                sta T3
+00E0C5  1  AD 10 D3             lda BX0
+00E0C8  1  48                   pha
+00E0C9  1  AD 1A D3             lda BX0H
+00E0CC  1  48                   pha
+00E0CD  1  AD 11 D3             lda BY0
+00E0D0  1  48                   pha
+00E0D1  1  AD 1B D3             lda BY0H
+00E0D4  1  48                   pha
+00E0D5  1  A5 FD                lda T3
+00E0D7  1  8D 10 D3             sta BX0
+00E0DA  1  A5 FE                lda T4
+00E0DC  1  8D 1A D3             sta BX0H
+00E0DF  1  A5 11                lda Itempl
+00E0E1  1  8D 11 D3             sta BY0
+00E0E4  1  A5 12                lda Itemph
+00E0E6  1  8D 1B D3             sta BY0H
+00E0E9  1  AD 19 D3             lda BPIXEL
+00E0EC  1  85 FD                sta T3
+00E0EE  1  68                   pla
+00E0EF  1  8D 1B D3             sta BY0H
+00E0F2  1  68                   pla
+00E0F3  1  8D 11 D3             sta BY0
+00E0F6  1  68                   pla
+00E0F7  1  8D 1A D3             sta BX0H
+00E0FA  1  68                   pla
+00E0FB  1  8D 10 D3             sta BX0
+00E0FE  1  A4 FD                ldy T3
+00E100  1  4C 98 E0             jmp byteval
+00E103  1  4C 33 A0     @bad:   jmp XSYNTAX
+00E106  1               
+00E106  1               ; !KEYDOWN("W") or !KEYDOWN(code): -1 while that key is held, else 0
+00E106  1               f_keydown:
+00E106  1  20 C1 E6             jsr flushkeys           ; (the typed copies of held keys: away)
+00E109  1  20 0C A0             jsr XCHRGOT
+00E10C  1  C9 28                cmp #'('
+00E10E  1  D0 3E                bne @bad
+00E110  1  20 09 A0             jsr XCHRGET
+00E113  1  C9 22                cmp #'"'                ; a string: its first character
+00E115  1  D0 1C                bne @num
+00E117  1  20 18 A0             jsr XGETSTR
+00E11A  1  86 F8                stx PTRA
+00E11C  1  84 F9                sty PTRA+1
+00E11E  1  AA                   tax                     ; (empty: code 0, never held)
+00E11F  1  F0 15                beq @code
+00E121  1  A0 00                ldy #0
+00E123  1  B1 F8                lda (PTRA),y
+00E125  1  C9 61                cmp #'a'
+00E127  1  90 06                bcc @up
+00E129  1  C9 7B                cmp #'z'+1
+00E12B  1  B0 02                bcs @up
+00E12D  1  29 DF                and #$DF
+00E12F  1  AA           @up:    tax
+00E130  1  4C 36 E1             jmp @code
+00E133  1  20 0F A0     @num:   jsr XGETBYTE
+00E136  1  8E 1A D0     @code:  stx KEYSEL
+00E139  1  20 0C A0             jsr XCHRGOT
+00E13C  1  C9 29                cmp #')'
+00E13E  1  D0 0E                bne @bad
+00E140  1  20 09 A0             jsr XCHRGET
+00E143  1  A0 00                ldy #0
+00E145  1  AD 1B D0             lda KEYHELD
+00E148  1  F0 01                beq @r
+00E14A  1  88                   dey                     ; held: -1 ($FFFF), BASIC's "true"
+00E14B  1  98           @r:     tya
+00E14C  1  18                   clc
+00E14D  1  60                   rts
+00E14E  1  4C 33 A0     @bad:   jmp XSYNTAX
+00E151  1               
+00E151  1               ; !KEYAT("W") or !KEYAT(scancode): -1 while the key in that PLACE is held
+00E151  1               ; ("W" = where W is on a US keyboard: Z on AZERTY), else 0
+00E151  1               f_keyat:
+00E151  1  20 C1 E6             jsr flushkeys
+00E154  1  20 0C A0             jsr XCHRGOT
+00E157  1  C9 28                cmp #'('
+00E159  1  D0 63                bne @bad
+00E15B  1  20 09 A0             jsr XCHRGET
+00E15E  1  C9 22                cmp #'"'
+00E160  1  D0 40                bne @num
+00E162  1  20 18 A0             jsr XGETSTR             ; a letter, digit or space: its US position
+00E165  1  86 F8                stx PTRA
+00E167  1  84 F9                sty PTRA+1
+00E169  1  AA                   tax
+00E16A  1  F0 52                beq @bad
+00E16C  1  A0 00                ldy #0
+00E16E  1  B1 F8                lda (PTRA),y
+00E170  1  C9 20                cmp #' '
+00E172  1  F0 15                beq @sp
+00E174  1  C9 61                cmp #'a'
+00E176  1  90 02                bcc @nl
+00E178  1  29 DF                and #$DF
+00E17A  1  C9 41        @nl:    cmp #'A'
+00E17C  1  90 10                bcc @dig
+00E17E  1  C9 5B                cmp #'Z'+1
+00E180  1  B0 3C                bcs @bad
+00E182  1  AA                   tax
+00E183  1  BD 80 E1             lda usletter-'A',x
+00E186  1  4C A6 E1             jmp @set
+00E189  1  A9 39        @sp:    lda #57
+00E18B  1  4C A6 E1             jmp @set
+00E18E  1  C9 30        @dig:   cmp #'0'
+00E190  1  F0 0B                beq @zero
+00E192  1  90 2A                bcc @bad
+00E194  1  C9 3A                cmp #'9'+1
+00E196  1  B0 26                bcs @bad
+00E198  1  E9 2E                sbc #'0'-2              ; (carry clear: 1-9 -> 2-10)
+00E19A  1  4C A6 E1             jmp @set
+00E19D  1  A9 0B        @zero:  lda #11
+00E19F  1  4C A6 E1             jmp @set
+00E1A2  1  20 0F A0     @num:   jsr XGETBYTE
+00E1A5  1  8A                   txa
+00E1A6  1  8D 1C D0     @set:   sta KEYPOS
+00E1A9  1  20 0C A0             jsr XCHRGOT
+00E1AC  1  C9 29                cmp #')'
+00E1AE  1  D0 0E                bne @bad
+00E1B0  1  20 09 A0             jsr XCHRGET
+00E1B3  1  A0 00                ldy #0
+00E1B5  1  AD 1D D0             lda POSHELD
+00E1B8  1  F0 01                beq @r
+00E1BA  1  88                   dey
+00E1BB  1  98           @r:     tya
+00E1BC  1  18                   clc
+00E1BD  1  60                   rts
+00E1BE  1  4C 36 A0     @bad:   jmp XFUNC
+00E1C1  1               ; PC scancodes of the letters A-Z on a US keyboard
+00E1C1  1               usletter:
+00E1C1  1  1E 30 2E 20          .byte 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50
+00E1C5  1  12 21 22 23  
+00E1C9  1  17 24 25 26  
+00E1CE  1  31 18 19 10          .byte 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44
+00E1D2  1  13 1F 14 16  
+00E1D6  1  2F 11 2D 15  
+00E1DB  1               
+00E1DB  1               ; the mouse in the units of the screen mode: Y low, A high
+00E1DB  1  AD 00 D3     mousex: lda MODE
+00E1DE  1  F0 0A                beq @t
+00E1E0  1  C9 03                cmp #3
+00E1E2  1  B0 0C                bcs @h
+00E1E4  1  AC 50 D5             ldy MOUSELX
+00E1E7  1  A9 00                lda #0
+00E1E9  1  60                   rts
+00E1EA  1  AC 52 D5     @t:     ldy MOUSECOL
+00E1ED  1  A9 00                lda #0
+00E1EF  1  60                   rts
+00E1F0  1  AC 00 D5     @h:     ldy MOUSEX
+00E1F3  1  AD 01 D5             lda MOUSEX+1
+00E1F6  1  60                   rts
+00E1F7  1  AD 00 D3     mousey: lda MODE
+00E1FA  1  F0 0A                beq @t
+00E1FC  1  C9 03                cmp #3
+00E1FE  1  B0 0C                bcs @h
+00E200  1  AC 51 D5             ldy MOUSELY
+00E203  1  A9 00                lda #0
+00E205  1  60                   rts
+00E206  1  AC 53 D5     @t:     ldy MOUSEROW
+00E209  1  A9 00                lda #0
+00E20B  1  60                   rts
+00E20C  1  AC 02 D5     @h:     ldy MOUSEY
+00E20F  1  AD 03 D5             lda MOUSEY+1
+00E212  1  60                   rts
+00E213  1               
+00E213  1               ; the commands' ends come here: carry clear = done
+00E213  1  18           done:   clc
+00E214  1  60                   rts
+00E215  1               
+00E215  1                       .include "bxmatch.inc"
+00E215  2               ; bxmatch.inc - the keyword matcher for mini6502 BASIC extensions.
+00E215  2               ; Part of mini6502 BASIC, derived from EhBASIC (c) Lee Davison: free for
+00E215  2               ; personal, non-commercial use only (see basic/README.txt).
+00E215  2               ; mini6502 additions Copyright (C) 2026 Benoit Colson, with the help of Claude AI.
+00E215  2               ; .include it after bx.inc. Uses zero page $F0-$F7.
+00E215  2               ;
+00E215  2               ; XMATCH: X/Y = a keyword list:
+00E215  2               ;     .byte "PLO", 'T'+$80, "LIN", 'E'+$80, 0
+00E215  2               ; Spaces between "!" and the keyword are fine.
+00E215  2               KWP     = $F0           ; 2: the keyword list
+00E215  2               TOKP    = $F2           ; 2: the text of a token being spelled out
+00E215  2               TOKN    = $F4           ; characters of it still to come
+00E215  2               TOKO    = $F5           ; where in it
+00E215  2               INOFF   = $F6           ; offset in the BASIC line
+00E215  2               KOFF    = $F7           ; offset in the keyword list
+00E215  2               
+00E215  2               ; which keyword of the list at X/Y comes next in the line? The list:
+00E215  2               ; each keyword in capitals, its last character + $80, then 0. Words BASIC
+00E215  2               ; turned into tokens are spelled out (COLOR is stored as C O L and OR). The
+00E215  2               ; keyword must not run on into a letter. Found: carry clear, A = its number
+00E215  2               ; (0 = the first), the line moved on past it (and to the next non-space).
+00E215  2               ; Not found: carry set, the line as it was.
+00E215  2  86 F0        XMATCH: stx KWP
+00E217  2  84 F1                sty KWP+1
+00E219  2  A9 00                lda #0
+00E21B  2  8D D4 E2             sta KIDX
+00E21E  2  A0 00        @kw:    ldy #0
+00E220  2  B1 F0                lda (KWP),y
+00E222  2  D0 02                bne @try
+00E224  2  38                   sec                     ; the end of the list
+00E225  2  60                   rts
+00E226  2  A9 00        @try:   lda #0
+00E228  2  85 F6                sta INOFF
+00E22A  2  85 F4                sta TOKN
+00E22C  2  85 F7                sta KOFF
+00E22E  2  20 81 E2     @ch:    jsr @next               ; the next character of the line
+00E231  2  8D D5 E2             sta KCH
+00E234  2  A4 F7                ldy KOFF
+00E236  2  B1 F0                lda (KWP),y
+00E238  2  29 7F                and #$7F
+00E23A  2  CD D5 E2             cmp KCH
+00E23D  2  D0 2A                bne @fail
+00E23F  2  B1 F0                lda (KWP),y
+00E241  2  E6 F7                inc KOFF
+00E243  2  0A                   asl                     ; its last character?
+00E244  2  90 E8                bcc @ch
+00E246  2  A5 F4                lda TOKN                ; not in the middle of a token
+00E248  2  D0 1F                bne @fail
+00E24A  2  A4 F6                ldy INOFF               ; and no letter right after it (a token
+00E24C  2  B1 C3                lda (Bpntrl),y          ; is fine: + - * / and so on)
+00E24E  2  C9 41                cmp #'A'
+00E250  2  90 04                bcc @ok
+00E252  2  C9 5B                cmp #'Z'+1
+00E254  2  90 13                bcc @fail
+00E256  2  18           @ok:    clc                     ; found: the line moves on
+00E257  2  A5 C3                lda Bpntrl
+00E259  2  65 F6                adc INOFF
+00E25B  2  85 C3                sta Bpntrl
+00E25D  2  90 02                bcc @nc
+00E25F  2  E6 C4                inc Bpntrh
+00E261  2  20 0C A0     @nc:    jsr XCHRGOT
+00E264  2  AD D4 E2             lda KIDX
+00E267  2  18                   clc
+00E268  2  60                   rts
+00E269  2  A0 00        @fail:  ldy #0                  ; on to the next keyword in the list
+00E26B  2  B1 F0        @sk:    lda (KWP),y
+00E26D  2  C8                   iny
+00E26E  2  0A                   asl
+00E26F  2  90 FA                bcc @sk
+00E271  2  98                   tya
+00E272  2  18                   clc
+00E273  2  65 F0                adc KWP
+00E275  2  85 F0                sta KWP
+00E277  2  90 02                bcc @nc2
+00E279  2  E6 F1                inc KWP+1
+00E27B  2  EE D4 E2     @nc2:   inc KIDX
+00E27E  2  4C 1E E2             jmp @kw
+00E281  2               ; the next character of the line, tokens spelled out, in capitals
+00E281  2  A5 F4        @next:  lda TOKN
+00E283  2  F0 0B                beq @raw
+00E285  2  C6 F4                dec TOKN
+00E287  2  A4 F5                ldy TOKO
+00E289  2  E6 F5                inc TOKO
+00E28B  2  B1 F2                lda (TOKP),y
+00E28D  2  29 7F                and #$7F
+00E28F  2  60                   rts
+00E290  2  A4 F6        @raw:   ldy INOFF
+00E292  2  E6 F6                inc INOFF
+00E294  2  B1 C3                lda (Bpntrl),y
+00E296  2  30 0B                bmi @tok
+00E298  2  C9 61                cmp #'a'
+00E29A  2  90 06                bcc @r
+00E29C  2  C9 7B                cmp #'z'+1
+00E29E  2  B0 02                bcs @r
+00E2A0  2  29 DF                and #$DF
+00E2A2  2  60           @r:     rts
+00E2A3  2  0A           @tok:   asl                     ; its keyword table entry: length, first
+00E2A4  2  0A                   asl                     ; character, address of the rest
+00E2A5  2  AE 25 A0             ldx XKEYT+1
+00E2A8  2  90 02                bcc @t1
+00E2AA  2  E8                   inx
+00E2AB  2  18                   clc
+00E2AC  2  6D 24 A0     @t1:    adc XKEYT
+00E2AF  2  90 01                bcc @t2
+00E2B1  2  E8                   inx
+00E2B2  2  85 F2        @t2:    sta TOKP
+00E2B4  2  86 F3                stx TOKP+1
+00E2B6  2  A0 00                ldy #0
+00E2B8  2  B1 F2                lda (TOKP),y            ; length
+00E2BA  2  38                   sec
+00E2BB  2  E9 01                sbc #1
+00E2BD  2  85 F4                sta TOKN
+00E2BF  2  C8                   iny
+00E2C0  2  B1 F2                lda (TOKP),y            ; first character
+00E2C2  2  48                   pha
+00E2C3  2  C8                   iny
+00E2C4  2  B1 F2                lda (TOKP),y
+00E2C6  2  AA                   tax
+00E2C7  2  C8                   iny
+00E2C8  2  B1 F2                lda (TOKP),y
+00E2CA  2  86 F2                stx TOKP
+00E2CC  2  85 F3                sta TOKP+1
+00E2CE  2  A9 00                lda #0
+00E2D0  2  85 F5                sta TOKO
+00E2D2  2  68                   pla
+00E2D3  2  60                   rts
+00E2D4  2               
+00E2D4  2  00           KIDX:   .byte 0             ; the keyword's number
+00E2D5  2  00           KCH:    .byte 0             ; the line's character being compared
+00E2D6  2               
+00E2D6  1               
+00E2D6  1               ; (in the order of the keyword list) - 1, for RTS
+00E2D6  1  E9 E3 F2 E3  cmds:   .word c_screen-1, c_clg-1, c_color-1, c_plot-1, c_line-1, c_box-1
+00E2DA  1  07 E4 10 E4  
+00E2DE  1  18 E4 23 E4  
+00E2E2  1  2E E4 39 E4          .word c_fill-1, c_pixel-1, c_palette-1, c_page-1, c_sprite-1
+00E2E6  1  4D E4 6C E4  
+00E2EA  1  91 E4        
+00E2EC  1  DD E4 ED E4          .word c_sproff-1, c_sprdef-1, c_sound-1, c_shape-1, c_quiet-1
+00E2F0  1  21 E5 62 E5  
+00E2F4  1  93 E5        
+00E2F6  1  A4 E5 EA E5          .word c_music-1, c_mouse-1, c_wait-1, c_pointer-1, c_bload-1
+00E2FA  1  10 E6 2F E6  
+00E2FE  1  61 E6        
+00E300  1  87 E6 D2 E6          .word c_bsave-1, c_help-1, c_flush-1
+00E304  1  BA E6        
+00E306  1               keywords:
+00E306  1  53 43 52 45          .byte "SCREE", 'N'+$80, "CL", 'G'+$80, "COLO", 'R'+$80
+00E30A  1  45 CE 43 4C  
+00E30E  1  C7 43 4F 4C  
+00E314  1  50 4C 4F D4          .byte "PLO", 'T'+$80, "LIN", 'E'+$80, "BO", 'X'+$80
+00E318  1  4C 49 4E C5  
+00E31C  1  42 4F D8     
+00E31F  1  46 49 4C CC          .byte "FIL", 'L'+$80, "PIXE", 'L'+$80, "PALETT", 'E'+$80
+00E323  1  50 49 58 45  
+00E327  1  CC 50 41 4C  
+00E32F  1  50 41 47 C5          .byte "PAG", 'E'+$80, "SPRIT", 'E'+$80, "SPROF", 'F'+$80
+00E333  1  53 50 52 49  
+00E337  1  54 C5 53 50  
+00E33F  1  53 50 52 44          .byte "SPRDE", 'F'+$80, "SOUN", 'D'+$80, "SHAP", 'E'+$80
+00E343  1  45 C6 53 4F  
+00E347  1  55 4E C4 53  
+00E34F  1  51 55 49 45          .byte "QUIE", 'T'+$80, "MUSI", 'C'+$80, "MOUS", 'E'+$80
+00E353  1  D4 4D 55 53  
+00E357  1  49 C3 4D 4F  
+00E35E  1  57 41 49 D4          .byte "WAI", 'T'+$80, "POINTE", 'R'+$80, "BLOA", 'D'+$80
+00E362  1  50 4F 49 4E  
+00E366  1  54 45 D2 42  
+00E36E  1  42 53 41 56          .byte "BSAV", 'E'+$80, "HEL", 'P'+$80, "FLUS", 'H'+$80
+00E372  1  C5 48 45 4C  
+00E376  1  D0 46 4C 55  
+00E37C  1  00                   .byte 0
+00E37D  1               
+00E37D  1  01           PEN:    .byte 1                 ; the drawing colour
+00E37E  1               
+00E37E  1               ; --- helpers --------------------------------------------------------------------
+00E37E  1               
+00E37E  1               ; is there another argument? (a "," next: skipped, carry set)
+00E37E  1  20 0C A0     more:   jsr XCHRGOT
+00E381  1  C9 2C                cmp #','
+00E383  1  D0 05                bne @no
+00E385  1  20 09 A0             jsr XCHRGET
+00E388  1  38                   sec
+00E389  1  60                   rts
+00E38A  1  18           @no:    clc
+00E38B  1  60                   rts
+00E38C  1               
+00E38C  1               ; x,y -> X0,Y0 (16 bits each, hires high bytes too)
+00E38C  1  20 15 A0     getxy0: jsr XGETWORD
+00E38F  1  A5 11                lda Itempl
+00E391  1  8D 10 D3             sta BX0
+00E394  1  A5 12                lda Itemph
+00E396  1  8D 1A D3             sta BX0H
+00E399  1  20 12 A0             jsr XCOMMA
+00E39C  1  20 15 A0             jsr XGETWORD
+00E39F  1  A5 11                lda Itempl
+00E3A1  1  8D 11 D3             sta BY0
+00E3A4  1  A5 12                lda Itemph
+00E3A6  1  8D 1B D3             sta BY0H
+00E3A9  1  60                   rts
+00E3AA  1               
+00E3AA  1               ; ,x1,y1 -> X1,Y1
+00E3AA  1  20 12 A0     getxy1: jsr XCOMMA
+00E3AD  1  20 15 A0             jsr XGETWORD
+00E3B0  1  A5 11                lda Itempl
+00E3B2  1  8D 12 D3             sta BX1
+00E3B5  1  A5 12                lda Itemph
+00E3B7  1  8D 1C D3             sta BX1H
+00E3BA  1  20 12 A0             jsr XCOMMA
+00E3BD  1  20 15 A0             jsr XGETWORD
+00E3C0  1  A5 11                lda Itempl
+00E3C2  1  8D 13 D3             sta BY1
+00E3C5  1  A5 12                lda Itemph
+00E3C7  1  8D 1D D3             sta BY1H
+00E3CA  1  60                   rts
+00E3CB  1               
+00E3CB  1               ; a byte after a ","
+00E3CB  1               combyte:
+00E3CB  1  20 12 A0             jsr XCOMMA
+00E3CE  1  4C 0F A0             jmp XGETBYTE
+00E3D1  1               
+00E3D1  1               ; the blitter command A with the pen colour
+00E3D1  1  AE 7D E3     blit:   ldx PEN
+00E3D4  1  8E 14 D3             stx BCOL
+00E3D7  1  8D 18 D3             sta BCMD
+00E3DA  1  4C 13 E2             jmp done
+00E3DD  1               
+00E3DD  1               ; X = a voice 1-4: Y = its register offset (0, 4, 8, 12)
+00E3DD  1  CA           voice:  dex
+00E3DE  1  E0 04                cpx #4
+00E3E0  1  B0 05                bcs bad
+00E3E2  1  8A                   txa
+00E3E3  1  0A                   asl
+00E3E4  1  0A                   asl
+00E3E5  1  A8                   tay
+00E3E6  1  60                   rts
+00E3E7  1               
+00E3E7  1  4C 36 A0     bad:    jmp XFUNC
+00E3EA  1               
+00E3EA  1               ; --- graphics -------------------------------------------------------------------
+00E3EA  1               c_screen:
+00E3EA  1  20 0F A0             jsr XGETBYTE
+00E3ED  1  8E 00 D3             stx MODE
+00E3F0  1  4C 13 E2             jmp done
+00E3F3  1               
+00E3F3  1  A2 00        c_clg:  ldx #0
+00E3F5  1  20 0C A0             jsr XCHRGOT
+00E3F8  1  F0 03                beq @go
+00E3FA  1  20 0F A0             jsr XGETBYTE
+00E3FD  1  8E 14 D3     @go:    stx BCOL
+00E400  1  A9 01                lda #C_CLEAR
+00E402  1  8D 18 D3             sta BCMD
+00E405  1  4C 13 E2             jmp done
+00E408  1               
+00E408  1               c_color:
+00E408  1  20 0F A0             jsr XGETBYTE
+00E40B  1  8E 7D E3             stx PEN
+00E40E  1  4C 13 E2             jmp done
+00E411  1               
+00E411  1  20 8C E3     c_plot: jsr getxy0
+00E414  1  A9 02                lda #C_PSET
+00E416  1  4C D1 E3             jmp blit
+00E419  1               
+00E419  1  20 8C E3     c_line: jsr getxy0
+00E41C  1  20 AA E3             jsr getxy1
+00E41F  1  A9 03                lda #C_LINE
+00E421  1  4C D1 E3             jmp blit
+00E424  1               
+00E424  1  20 8C E3     c_box:  jsr getxy0
+00E427  1  20 AA E3             jsr getxy1
+00E42A  1  A9 04                lda #C_BOX
+00E42C  1  4C D1 E3             jmp blit
+00E42F  1               
+00E42F  1  20 8C E3     c_fill: jsr getxy0
+00E432  1  20 AA E3             jsr getxy1
+00E435  1  A9 05                lda #C_BOXF
+00E437  1  4C D1 E3             jmp blit
+00E43A  1               
+00E43A  1               c_pixel:
+00E43A  1  20 8C E3             jsr getxy0
+00E43D  1  20 12 A0             jsr XCOMMA
+00E440  1  20 1B A0             jsr XGETVAR
+00E443  1  AC 19 D3             ldy BPIXEL
+00E446  1  A9 00                lda #0
+00E448  1  20 1E A0             jsr XSETVAR
+00E44B  1  4C 13 E2             jmp done
+00E44E  1               
+00E44E  1               c_palette:
+00E44E  1  20 0F A0             jsr XGETBYTE
+00E451  1  E0 20                cpx #32
+00E453  1  B0 92                bcs bad
+00E455  1  8E 08 D3             stx PALIDX
+00E458  1  20 CB E3             jsr combyte
+00E45B  1  8E 09 D3             stx PALR
+00E45E  1  20 CB E3             jsr combyte
+00E461  1  8E 0A D3             stx PALG
+00E464  1  20 CB E3             jsr combyte
+00E467  1  8E 0B D3             stx PALB
+00E46A  1  4C 13 E2             jmp done
+00E46D  1               
+00E46D  1  20 0F A0     c_page: jsr XGETBYTE
+00E470  1  8E 01 D3             stx SHOW
+00E473  1  20 7E E3             jsr more
+00E476  1  90 06                bcc @d
+00E478  1  20 0F A0             jsr XGETBYTE
+00E47B  1  8E 02 D3             stx DRAW
+00E47E  1  4C 13 E2     @d:     jmp done
+00E481  1               
+00E481  1               ; --- sprites --------------------------------------------------------------------
+00E481  1               ; sprite n -> T0 = n * 8 (its offset in SPR)
+00E481  1  20 0F A0     sprnum: jsr XGETBYTE
+00E484  1  E0 20                cpx #32
+00E486  1  B0 07                bcs @bad
+00E488  1  8A                   txa
+00E489  1  0A                   asl
+00E48A  1  0A                   asl
+00E48B  1  0A                   asl
+00E48C  1  85 FA                sta T0
+00E48E  1  60                   rts
+00E48F  1  4C 36 A0     @bad:   jmp XFUNC
+00E492  1               
+00E492  1               c_sprite:
+00E492  1  20 81 E4             jsr sprnum
+00E495  1  20 12 A0             jsr XCOMMA
+00E498  1  20 15 A0             jsr XGETWORD            ; x + 16
+00E49B  1  18                   clc
+00E49C  1  A5 11                lda Itempl
+00E49E  1  69 10                adc #16
+00E4A0  1  A6 FA                ldx T0
+00E4A2  1  9D 00 D4             sta SPR,x
+00E4A5  1  20 12 A0             jsr XCOMMA
+00E4A8  1  20 15 A0             jsr XGETWORD            ; y + 16
+00E4AB  1  18                   clc
+00E4AC  1  A5 11                lda Itempl
+00E4AE  1  69 10                adc #16
+00E4B0  1  A6 FA                ldx T0
+00E4B2  1  9D 01 D4             sta SPR+1,x
+00E4B5  1  20 7E E3             jsr more
+00E4B8  1  90 17                bcc @on
+00E4BA  1  20 0F A0             jsr XGETBYTE            ; image
+00E4BD  1  8A                   txa
+00E4BE  1  A6 FA                ldx T0
+00E4C0  1  9D 02 D4             sta SPR+2,x
+00E4C3  1  20 7E E3             jsr more
+00E4C6  1  90 09                bcc @on
+00E4C8  1  20 0F A0             jsr XGETBYTE            ; flags
+00E4CB  1  8A                   txa
+00E4CC  1  A6 FA                ldx T0
+00E4CE  1  9D 03 D4             sta SPR+3,x
+00E4D1  1  A6 FA        @on:    ldx T0
+00E4D3  1  BD 03 D4             lda SPR+3,x
+00E4D6  1  09 01                ora #1
+00E4D8  1  9D 03 D4             sta SPR+3,x
+00E4DB  1  4C 13 E2             jmp done
+00E4DE  1               
+00E4DE  1               c_sproff:
+00E4DE  1  20 81 E4             jsr sprnum
+00E4E1  1  A6 FA                ldx T0
+00E4E3  1  BD 03 D4             lda SPR+3,x
+00E4E6  1  29 FE                and #$FE
+00E4E8  1  9D 03 D4             sta SPR+3,x
+00E4EB  1  4C 13 E2             jmp done
+00E4EE  1               
+00E4EE  1               c_sprdef:
+00E4EE  1  20 0F A0             jsr XGETBYTE            ; image n: $FD0000 + n * 256
+00E4F1  1  86 FA                stx T0
+00E4F3  1  20 12 A0             jsr XCOMMA
+00E4F6  1  20 15 A0             jsr XGETWORD
+00E4F9  1  A5 11                lda Itempl
+00E4FB  1  85 F8                sta PTRA
+00E4FD  1  A5 12                lda Itemph
+00E4FF  1  85 F9                sta PTRA+1
+00E501  1  A9 00                lda #0
+00E503  1  8D 00 D2             sta PADR
+00E506  1  A5 FA                lda T0
+00E508  1  8D 01 D2             sta PADR+1
+00E50B  1  A9 FD                lda #$FD
+00E50D  1  8D 02 D2             sta PADR+2
+00E510  1  A9 01                lda #1
+00E512  1  8D 04 D2             sta PSTEP
+00E515  1  A0 00                ldy #0
+00E517  1  B1 F8        @c:     lda (PTRA),y
+00E519  1  8D 03 D2             sta PDATA
+00E51C  1  C8                   iny
+00E51D  1  D0 F8                bne @c
+00E51F  1  4C 13 E2             jmp done
+00E522  1               
+00E522  1               ; --- sound ----------------------------------------------------------------------
+00E522  1               c_sound:
+00E522  1  20 0F A0             jsr XGETBYTE            ; voice
+00E525  1  20 DD E3             jsr voice
+00E528  1  84 FB                sty T1
+00E52A  1  20 CB E3             jsr combyte             ; note (set last: it starts the sound)
+00E52D  1  86 FC                stx T2
+00E52F  1  20 7E E3             jsr more
+00E532  1  90 25                bcc @go
+00E534  1  20 0F A0             jsr XGETBYTE
+00E537  1  A4 FB                ldy T1
+00E539  1  8A                   txa
+00E53A  1  99 31 D0             sta SND+V_VOL,y
+00E53D  1  20 7E E3             jsr more
+00E540  1  90 17                bcc @go
+00E542  1  20 0F A0             jsr XGETBYTE
+00E545  1  A4 FB                ldy T1
+00E547  1  8A                   txa
+00E548  1  99 32 D0             sta SND+V_WAVE,y
+00E54B  1  20 7E E3             jsr more
+00E54E  1  90 09                bcc @go
+00E550  1  20 0F A0             jsr XGETBYTE
+00E553  1  A4 FB                ldy T1
+00E555  1  8A                   txa
+00E556  1  99 33 D0             sta SND+V_DUR,y
+00E559  1  A4 FB        @go:    ldy T1
+00E55B  1  A5 FC                lda T2
+00E55D  1  99 30 D0             sta SND+V_NOTE,y
+00E560  1  4C 13 E2             jmp done
+00E563  1               
+00E563  1               c_shape:
+00E563  1  20 0F A0             jsr XGETBYTE
+00E566  1  20 DD E3             jsr voice
+00E569  1  84 FB                sty T1
+00E56B  1  20 CB E3             jsr combyte             ; decay
+00E56E  1  A4 FB                ldy T1
+00E570  1  8A                   txa
+00E571  1  99 50 D0             sta SHP+S_DECAY,y
+00E574  1  20 7E E3             jsr more
+00E577  1  90 18                bcc @d
+00E579  1  20 15 A0             jsr XGETWORD            ; sweep, signed
+00E57C  1  A4 FB                ldy T1
+00E57E  1  A5 11                lda Itempl
+00E580  1  99 51 D0             sta SHP+S_SWEEP,y
+00E583  1  20 7E E3             jsr more
+00E586  1  90 09                bcc @d
+00E588  1  20 0F A0             jsr XGETBYTE            ; pulse
+00E58B  1  A4 FB                ldy T1
+00E58D  1  8A                   txa
+00E58E  1  99 52 D0             sta SHP+S_PULSE,y
+00E591  1  4C 13 E2     @d:     jmp done
+00E594  1               
+00E594  1               c_quiet:
+00E594  1  A9 00                lda #0
+00E596  1  8D 30 D0             sta V1+V_NOTE
+00E599  1  8D 34 D0             sta V2+V_NOTE
+00E59C  1  8D 38 D0             sta V3+V_NOTE
+00E59F  1  8D 3C D0             sta V4+V_NOTE
+00E5A2  1  4C 13 E2             jmp done
+00E5A5  1               
+00E5A5  1               ; !MUSIC b: the engine (bank B_MUSIC, "MUSIC" at $E006) must be there
+00E5A5  1               c_music:
+00E5A5  1  20 0F A0             jsr XGETBYTE
+00E5A8  1  86 FA                stx T0
+00E5AA  1  A9 06                lda #$06                ; look for its name at $E006, through port A
+00E5AC  1  8D 00 D2             sta PADR
+00E5AF  1  A9 20                lda #<(B_MUSIC << 4)
+00E5B1  1  8D 01 D2             sta PADR+1
+00E5B4  1  A9 01                lda #>(B_MUSIC << 4)
+00E5B6  1  8D 02 D2             sta PADR+2
+00E5B9  1  A9 01                lda #1
+00E5BB  1  8D 04 D2             sta PSTEP
+00E5BE  1  A0 00                ldy #0
+00E5C0  1  AD 03 D2     @n:     lda PDATA
+00E5C3  1  D9 E6 E5             cmp s_music,y
+00E5C6  1  D0 1B                bne bad2
+00E5C8  1  C8                   iny
+00E5C9  1  C0 05                cpy #5
+00E5CB  1  D0 F3                bne @n
+00E5CD  1  A6 FA                ldx T0
+00E5CF  1  F0 0A                beq @stop
+00E5D1  1  A9 00                lda #0                  ; PLAY bank X
+00E5D3  1  20 D0 CC             jsr E_MUSIC
+00E5D6  1  B0 0B                bcs bad2                ; not a song
+00E5D8  1  4C 13 E2             jmp done
+00E5DB  1  A9 01        @stop:  lda #1                  ; STOP
+00E5DD  1  20 D0 CC             jsr E_MUSIC
+00E5E0  1  4C 13 E2             jmp done
+00E5E3  1  4C 36 A0     bad2:   jmp XFUNC
+00E5E6  1  4D 55 53 49  s_music: .byte "MUSIC"
+00E5EA  1  43           
+00E5EB  1               
+00E5EB  1               ; --- mouse, time ------------------------------------------------------------------
+00E5EB  1               c_mouse:
+00E5EB  1  20 1B A0             jsr XGETVAR             ; X
+00E5EE  1  20 DB E1             jsr mousex
+00E5F1  1  20 1E A0             jsr XSETVAR
+00E5F4  1  20 12 A0             jsr XCOMMA
+00E5F7  1  20 1B A0             jsr XGETVAR             ; Y
+00E5FA  1  20 F7 E1             jsr mousey
+00E5FD  1  20 1E A0             jsr XSETVAR
+00E600  1  20 12 A0             jsr XCOMMA
+00E603  1  20 1B A0             jsr XGETVAR             ; B
+00E606  1  AC 04 D5             ldy BUTTONS
+00E609  1  A9 00                lda #0
+00E60B  1  20 1E A0             jsr XSETVAR
+00E60E  1  4C 13 E2             jmp done
+00E611  1               
+00E611  1  20 15 A0     c_wait: jsr XGETWORD
+00E614  1  A5 11        @f:     lda Itempl
+00E616  1  05 12                ora Itemph
+00E618  1  F0 13                beq @d
+00E61A  1  AD 01 D0             lda FRAME
+00E61D  1  CD 01 D0     @w:     cmp FRAME
+00E620  1  F0 FB                beq @w
+00E622  1  A5 11                lda Itempl
+00E624  1  D0 02                bne @l
+00E626  1  C6 12                dec Itemph
+00E628  1  C6 11        @l:     dec Itempl
+00E62A  1  4C 14 E6             jmp @f
+00E62D  1  4C 13 E2     @d:     jmp done
+00E630  1               
+00E630  1               c_pointer:
+00E630  1  20 0F A0             jsr XGETBYTE
+00E633  1  8A                   txa
+00E634  1  F0 02                beq @s
+00E636  1  A9 03                lda #3                  ; shown, following the mouse
+00E638  1  8D 08 D5     @s:     sta PTR
+00E63B  1  4C 13 E2             jmp done
+00E63E  1               
+00E63E  1               ; --- disk -----------------------------------------------------------------------
+00E63E  1               ; "name" -> DNAME / DNLEN
+00E63E  1  20 18 A0     fname:  jsr XGETSTR
+00E641  1  8D 48 D0             sta DNLEN
+00E644  1  8E 46 D0             stx DNAME
+00E647  1  8C 47 D0             sty DNAME+1
+00E64A  1  60                   rts
+00E64B  1               
+00E64B  1               ; [,bank] -> X (else the program's bank); a free bank becomes "by hand"
+00E64B  1  20 7E E3     fbank:  jsr more
+00E64E  1  90 0E                bcc @own
+00E650  1  20 0F A0             jsr XGETBYTE
+00E653  1  BD 00 CF             lda BANKMAP,x
+00E656  1  D0 05                bne @r
+00E658  1  A9 FE                lda #OWN_HAND
+00E65A  1  9D 00 CF             sta BANKMAP,x
+00E65D  1  60           @r:     rts
+00E65E  1  AE 11 03     @own:   ldx XBANK
+00E661  1  60                   rts
+00E662  1               
+00E662  1               c_bload:
+00E662  1  20 3E E6             jsr fname
+00E665  1  20 12 A0             jsr XCOMMA
+00E668  1  20 15 A0             jsr XGETWORD
+00E66B  1  A5 11                lda Itempl
+00E66D  1  8D 42 D0             sta DSTART
+00E670  1  A5 12                lda Itemph
+00E672  1  8D 43 D0             sta DSTART+1
+00E675  1  A9 00                lda #0                  ; no limit
+00E677  1  8D 44 D0             sta DEND
+00E67A  1  8D 45 D0             sta DEND+1
+00E67D  1  20 4B E6             jsr fbank
+00E680  1  A9 03                lda #3                  ; LOAD at DSTART
+00E682  1  20 27 A0             jsr XDISK
+00E685  1  4C 13 E2             jmp done
+00E688  1               
+00E688  1               c_bsave:
+00E688  1  20 3E E6             jsr fname
+00E68B  1  20 12 A0             jsr XCOMMA
+00E68E  1  20 15 A0             jsr XGETWORD
+00E691  1  A5 11                lda Itempl
+00E693  1  8D 42 D0             sta DSTART
+00E696  1  A5 12                lda Itemph
+00E698  1  8D 43 D0             sta DSTART+1
+00E69B  1  20 12 A0             jsr XCOMMA
+00E69E  1  20 15 A0             jsr XGETWORD            ; the end, included: END = it + 1
+00E6A1  1  18                   clc
+00E6A2  1  A5 11                lda Itempl
+00E6A4  1  69 01                adc #1
+00E6A6  1  8D 44 D0             sta DEND
+00E6A9  1  A5 12                lda Itemph
+00E6AB  1  69 00                adc #0
+00E6AD  1  8D 45 D0             sta DEND+1
+00E6B0  1  20 4B E6             jsr fbank
+00E6B3  1  A9 02                lda #2                  ; SAVE
+00E6B5  1  20 27 A0             jsr XDISK
+00E6B8  1  4C 13 E2             jmp done
+00E6BB  1               
+00E6BB  1               ; !FLUSH: the keys waiting to be read are thrown away
+00E6BB  1               c_flush:
+00E6BB  1  20 C1 E6             jsr flushkeys
+00E6BE  1  4C 13 E2             jmp done
+00E6C1  1               
+00E6C1  1               ; Takes every waiting key except a Ctrl-C (BASIC's break must still work).
+00E6C1  1               ; A program steering with !KEYDOWN would otherwise leave the held keys'
+00E6C1  1               ; typed copies (auto-repeat and all) for BASIC to find when it stops.
+00E6C1  1               flushkeys:
+00E6C1  1  AD 14 D0             lda KBDPEEK
+00E6C4  1  F0 0C                beq @r                  ; none
+00E6C6  1  29 7F                and #$7F
+00E6C8  1  C9 03                cmp #3
+00E6CA  1  F0 06                beq @r
+00E6CC  1  AD 10 D0             lda KBD
+00E6CF  1  4C C1 E6             jmp flushkeys
+00E6D2  1  60           @r:     rts
+00E6D3  1               
+00E6D3  1               ; --- help -----------------------------------------------------------------------
+00E6D3  1  A9 00        c_help: lda #0
+00E6D5  1  85 FB                sta T1
+00E6D7  1  A4 FB        @w:     ldy T1
+00E6D9  1  B9 06 E3             lda keywords,y
+00E6DC  1  F0 21                beq @end
+00E6DE  1  A9 21                lda #'!'
+00E6E0  1  20 2A A0             jsr XPRINT
+00E6E3  1  A4 FB        @c:     ldy T1
+00E6E5  1  B9 06 E3             lda keywords,y
+00E6E8  1  29 7F                and #$7F
+00E6EA  1  20 2A A0             jsr XPRINT
+00E6ED  1  A4 FB                ldy T1
+00E6EF  1  E6 FB                inc T1
+00E6F1  1  B9 06 E3             lda keywords,y
+00E6F4  1  0A                   asl
+00E6F5  1  90 EC                bcc @c
+00E6F7  1  A9 20                lda #' '
+00E6F9  1  20 2A A0             jsr XPRINT
+00E6FC  1  4C D7 E6             jmp @w
+00E6FF  1  20 2D A0     @end:   jsr XCRLF
+00E702  1  A0 00                ldy #0                  ; and the functions
+00E704  1  B9 4F E0     @fw:    lda fwords,y
+00E707  1  F0 25                beq @fe
+00E709  1  84 FB                sty T1
+00E70B  1  A9 21                lda #'!'
+00E70D  1  20 2A A0             jsr XPRINT
+00E710  1  A4 FB        @fc:    ldy T1
+00E712  1  B9 4F E0             lda fwords,y
+00E715  1  29 7F                and #$7F
+00E717  1  20 2A A0             jsr XPRINT
+00E71A  1  A4 FB                ldy T1
+00E71C  1  E6 FB                inc T1
+00E71E  1  B9 4F E0             lda fwords,y
+00E721  1  0A                   asl
+00E722  1  90 EC                bcc @fc
+00E724  1  A9 20                lda #' '
+00E726  1  20 2A A0             jsr XPRINT
+00E729  1  A4 FB                ldy T1
+00E72B  1  4C 04 E7             jmp @fw
+00E72E  1  20 2D A0     @fe:    jsr XCRLF
+00E731  1  4C 13 E2             jmp done
+00E734  1               
+00E734  1                       .assert * <= $F000, error, "GFX must fit in its bank"
+00E734  1               

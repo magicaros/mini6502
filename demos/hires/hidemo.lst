@@ -1,0 +1,705 @@
+ca65 V2.19 - Git 52727a5
+Main file   : hidemo.asm
+Current file: hidemo.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; hidemo.asm - mini6502 hires test: a desktop-like screen  (bank RAM $E000-$EFFF)
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain. Draws a patterned desktop, a menu bar, a window listing the
+000000r 1               ; disk (DIR into memory, clipped to the window), a window of text styles and
+000000r 1               ; fill patterns, two icons; the mouse pointer follows the mouse, its position
+000000r 1               ; shows in the menu bar, and dragging with the left button draws an XOR
+000000r 1               ; rubber band box. Any key goes back to text.
+000000r 1               ;
+000000r 1               ;   L HIDEMO E000 04      load into bank 4 (any bank works)
+000000r 1               ;   D020: 04              select it
+000000r 1               ;   E000R                 run (or CALL $E000 from BASIC)
+000000r 1               ;
+000000r 1               ; Most of the screen is a "display list": pairs of (register - $D300, value)
+000000r 1               ; written in order, so a whole drawing is data. Zero page: $E2-$E3 only.
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1               FRAME   = $D001
+000000r 1               KBD     = $D010
+000000r 1               KBDCR   = $D011
+000000r 1               BANK    = $D020
+000000r 1               DCMD    = $D040
+000000r 1               DSTAT   = $D041
+000000r 1               DSTART  = $D042
+000000r 1               DEND    = $D044
+000000r 1               DMASRC  = $D210
+000000r 1               DMACMD  = $D219
+000000r 1               VID     = $D300
+000000r 1               MODE    = $D300
+000000r 1               MOUSEX  = $D500
+000000r 1               MOUSEY  = $D502
+000000r 1               BUTTONS = $D504
+000000r 1               PTR     = $D508
+000000r 1               
+000000r 1               PTRZ    = $E2           ; zero page pointer
+000000r 1               
+000000r 1               ; display list registers (offset from $D300)
+000000r 1               R_X0 = $10
+000000r 1               R_Y0 = $11
+000000r 1               R_X1 = $12
+000000r 1               R_Y1 = $13
+000000r 1               R_COL = $14
+000000r 1               R_CMD = $18
+000000r 1               R_X0H = $1A
+000000r 1               R_Y0H = $1B
+000000r 1               R_X1H = $1C
+000000r 1               R_Y1H = $1D
+000000r 1               R_ROP = $28
+000000r 1               R_PATON = $29
+000000r 1               R_STYLE = $2B
+000000r 1               R_OUT = $2C
+000000r 1               R_PAT = $30
+000000r 1               R_CLIP = $38
+000000r 1               D_END = $FF
+000000r 1               
+000000r 1               C_CLEAR = 1
+000000r 1               C_LINE = 3
+000000r 1               C_BOX = 4
+000000r 1               C_BOXF = 5
+000000r 1               C_STAMP = 10
+000000r 1               
+000000r 1               S_BOLD = 1
+000000r 1               S_UNDER = 2
+000000r 1               S_ITALIC = 4
+000000r 1               S_INV = 8
+000000r 1               S_OPAQUE = 16
+000000r 1               
+000000r 1               BUF     = $EA00         ; the directory, in this bank (after the code)
+000000r 1               
+000000r 1               .macro  DPOS px, py
+000000r 1                       .byte R_X0, <(px), R_X0H, >(px), R_Y0, <(py), R_Y0H, >(py)
+000000r 1               .endmacro
+000000r 1               .macro  DRECT x0, y0, x1, y1
+000000r 1                       DPOS x0, y0
+000000r 1                       .byte R_X1, <(x1), R_X1H, >(x1), R_Y1, <(y1), R_Y1H, >(y1)
+000000r 1               .endmacro
+000000r 1               .macro  DCMD c, col
+000000r 1                       .byte R_COL, col, R_CMD, c
+000000r 1               .endmacro
+000000r 1               .macro  DTEXT px, py, style, str
+000000r 1                       DPOS px, py
+000000r 1                       .byte R_STYLE, style
+000000r 1                       .repeat .strlen(str), i
+000000r 1                       .byte R_OUT, .strat(str, i)
+000000r 1                       .endrep
+000000r 1               .endmacro
+000000r 1               .macro  DPATTERN p0, p1, p2, p3, p4, p5, p6, p7
+000000r 1                       .byte R_PAT, p0, R_PAT+1, p1, R_PAT+2, p2, R_PAT+3, p3
+000000r 1                       .byte R_PAT+4, p4, R_PAT+5, p5, R_PAT+6, p6, R_PAT+7, p7
+000000r 1               .endmacro
+000000r 1               .macro  DCLIP x0, y0, x1, y1
+000000r 1                       .byte R_CLIP, <(x0), R_CLIP+1, >(x0), R_CLIP+2, <(y0), R_CLIP+3, >(y0)
+000000r 1                       .byte R_CLIP+4, <(x1), R_CLIP+5, >(x1), R_CLIP+6, <(y1), R_CLIP+7, >(y1)
+000000r 1               .endmacro
+000000r 1               ; a window: shadow, white body, frame, striped title bar, close box, title
+000000r 1               .macro  DWINDOW x0, y0, x1, y1, title
+000000r 1                       .byte R_ROP, 0, R_PATON, 0
+000000r 1                       DRECT x0+3, y0+3, x1+3, y1+3
+000000r 1                       DCMD C_BOXF, 1
+000000r 1                       DRECT x0, y0, x1, y1
+000000r 1                       DCMD C_BOXF, 0
+000000r 1                       DCMD C_BOX, 1
+000000r 1                       DRECT x0, y0+20, x1, y0+20
+000000r 1                       DCMD C_LINE, 1
+000000r 1                       DPATTERN $FF, $00, $FF, $00, $FF, $00, $FF, $00
+000000r 1                       .byte R_PATON, 1
+000000r 1                       DRECT x0+2, y0+3, x1-2, y0+17
+000000r 1                       DCMD C_BOXF, 1
+000000r 1                       .byte R_PATON, 0
+000000r 1                       DRECT x0+8, y0+5, x0+20, y0+15
+000000r 1                       DCMD C_BOXF, 0
+000000r 1                       DCMD C_BOX, 1
+000000r 1                       DTEXT (x0+x1)/2-(.strlen(title)+2)*4, y0+2, S_OPAQUE, .concat(" ", title, " ")
+000000r 1               .endmacro
+000000r 1               
+000000r 1                       .org $E000
+00E000  1               
+00E000  1               start:
+00E000  1  A9 03                lda #3                  ; hires
+00E002  1  8D 00 D3             sta MODE
+00E005  1  20 69 E0             jsr icons
+00E008  1  A9 E2                lda #<scene
+00E00A  1  A2 E2                ldx #>scene
+00E00C  1  20 4A E0             jsr dlist
+00E00F  1  20 A4 E0             jsr dirwin
+00E012  1  A9 67                lda #<fullclip
+00E014  1  A2 E4                ldx #>fullclip
+00E016  1  20 4A E0             jsr dlist
+00E019  1  A9 03                lda #3                  ; pointer on, following the mouse
+00E01B  1  8D 08 D5             sta PTR
+00E01E  1  A9 00                lda #0
+00E020  1  8D 42 E7             sta banding
+00E023  1               
+00E023  1               ; --- main loop ----------------------------------------------------------------------
+00E023  1               loop:
+00E023  1  AD 01 D0             lda FRAME
+00E026  1  CD 01 D0     @wait:  cmp FRAME
+00E029  1  F0 FB                beq @wait
+00E02B  1  20 C1 E1             jsr showxy
+00E02E  1  20 13 E2             jsr band
+00E031  1  AD 11 D0             lda KBDCR
+00E034  1  10 ED                bpl loop
+00E036  1  AD 10 D0             lda KBD
+00E039  1  AD 42 E7             lda banding             ; a band still drawn: rub it out
+00E03C  1  F0 03                beq @quit
+00E03E  1  20 98 E2             jsr xorbox
+00E041  1  A9 00        @quit:  lda #0
+00E043  1  8D 08 D5             sta PTR
+00E046  1  8D 00 D3             sta MODE
+00E049  1  60                   rts
+00E04A  1               
+00E04A  1               ; --- display list: pairs (register - $D300, value), ends with $FF -------------
+00E04A  1               dlist:
+00E04A  1  85 E2                sta PTRZ
+00E04C  1  86 E3                stx PTRZ+1
+00E04E  1  A0 00                ldy #0
+00E050  1  B1 E2        @next:  lda (PTRZ),y
+00E052  1  C9 FF                cmp #D_END
+00E054  1  F0 12                beq @done
+00E056  1  AA                   tax
+00E057  1  C8                   iny
+00E058  1  D0 02                bne @val
+00E05A  1  E6 E3                inc PTRZ+1
+00E05C  1  B1 E2        @val:   lda (PTRZ),y
+00E05E  1  9D 00 D3             sta VID,x
+00E061  1  C8                   iny
+00E062  1  D0 EC                bne @next
+00E064  1  E6 E3                inc PTRZ+1
+00E066  1  D0 E8                bne @next
+00E068  1  60           @done:  rts
+00E069  1               
+00E069  1               ; --- the icons to sprite images 0-1 ($FD0000) with the DMA ---------------------
+00E069  1               icons:
+00E069  1  A9 53                lda #<(iconimg - $E000)
+00E06B  1  8D 10 D2             sta DMASRC
+00E06E  1  AD 20 D0             lda BANK
+00E071  1  0A                   asl
+00E072  1  0A                   asl
+00E073  1  0A                   asl
+00E074  1  0A                   asl
+00E075  1  09 07                ora #>(iconimg - $E000)
+00E077  1  8D 11 D2             sta DMASRC+1
+00E07A  1  AD 20 D0             lda BANK
+00E07D  1  4A                   lsr
+00E07E  1  4A                   lsr
+00E07F  1  4A                   lsr
+00E080  1  4A                   lsr
+00E081  1  8D 12 D2             sta DMASRC+2
+00E084  1  A9 00                lda #0
+00E086  1  8D 13 D2             sta DMASRC+3
+00E089  1  8D 14 D2             sta DMASRC+4
+00E08C  1  8D 18 D2             sta DMASRC+8
+00E08F  1  A9 FD                lda #$FD
+00E091  1  8D 15 D2             sta DMASRC+5
+00E094  1  A9 00                lda #<(iconend - iconimg)
+00E096  1  8D 16 D2             sta DMASRC+6
+00E099  1  A9 02                lda #>(iconend - iconimg)
+00E09B  1  8D 17 D2             sta DMASRC+7
+00E09E  1  A9 01                lda #1
+00E0A0  1  8D 19 D2             sta DMACMD
+00E0A3  1  60                   rts
+00E0A4  1               
+00E0A4  1               ; --- the disk window's file list ---------------------------------------------------
+00E0A4  1               dirwin:
+00E0A4  1  A9 00                lda #<BUF               ; DIR into memory at BUF, up to $EFFF
+00E0A6  1  8D 42 D0             sta DSTART
+00E0A9  1  A9 EA                lda #>BUF
+00E0AB  1  8D 43 D0             sta DSTART+1
+00E0AE  1  A9 00                lda #$00
+00E0B0  1  8D 44 D0             sta DEND
+00E0B3  1  A9 F0                lda #$F0
+00E0B5  1  8D 45 D0             sta DEND+1
+00E0B8  1  A9 07                lda #7
+00E0BA  1  8D 40 D0             sta DCMD
+00E0BD  1  AD 41 D0             lda DSTAT
+00E0C0  1  F0 01                beq @ok
+00E0C2  1  60                   rts
+00E0C3  1  A9 00        @ok:    lda #<BUF
+00E0C5  1  85 E2                sta PTRZ
+00E0C7  1  A9 EA                lda #>BUF
+00E0C9  1  85 E3                sta PTRZ+1
+00E0CB  1  A9 6C                lda #<108               ; first row
+00E0CD  1  8D 4B E7             sta rowy
+00E0D0  1  A9 00                lda #>108
+00E0D2  1  8D 4C E7             sta rowy+1
+00E0D5  1  A0 00        @file:  ldy #0
+00E0D7  1  B1 E2                lda (PTRZ),y
+00E0D9  1  D0 01                bne @name
+00E0DB  1  60                   rts                     ; the final 0
+00E0DC  1  A9 38        @name:  lda #<56
+00E0DE  1  A2 00                ldx #>56
+00E0E0  1  20 64 E1             jsr setx
+00E0E3  1  A9 00                lda #0                  ; plain text
+00E0E5  1  8D 2B D3             sta VID+R_STYLE
+00E0E8  1  B1 E2        @ch:    lda (PTRZ),y            ; the name
+00E0EA  1  F0 06                beq @size
+00E0EC  1  8D 2C D3             sta VID+R_OUT
+00E0EF  1  C8                   iny
+00E0F0  1  D0 F6                bne @ch
+00E0F2  1  C8           @size:  iny                     ; size: 3 bytes (only 2 shown)
+00E0F3  1  B1 E2                lda (PTRZ),y
+00E0F5  1  8D 4D E7             sta num
+00E0F8  1  C8                   iny
+00E0F9  1  B1 E2                lda (PTRZ),y
+00E0FB  1  8D 4E E7             sta num+1
+00E0FE  1  C8                   iny
+00E0FF  1  B1 E2                lda (PTRZ),y            ; $FF: not a mini6502 file
+00E101  1  8D 50 E7             sta big
+00E104  1  C8                   iny
+00E105  1  B1 E2                lda (PTRZ),y            ; load address
+00E107  1  8D 51 E7             sta load
+00E10A  1  C8                   iny
+00E10B  1  B1 E2                lda (PTRZ),y
+00E10D  1  8D 52 E7             sta load+1
+00E110  1  C8                   iny
+00E111  1  98                   tya                     ; next record
+00E112  1  18                   clc
+00E113  1  65 E2                adc PTRZ
+00E115  1  85 E2                sta PTRZ
+00E117  1  90 02                bcc @x
+00E119  1  E6 E3                inc PTRZ+1
+00E11B  1  A9 EC        @x:     lda #<236
+00E11D  1  A2 00                ldx #>236
+00E11F  1  20 64 E1             jsr setx
+00E122  1  AD 50 E7             lda big
+00E125  1  D0 1D                bne @nosize
+00E127  1  A0 00                ldy #0                  ; 5 digits
+00E129  1  20 77 E1             jsr decout
+00E12C  1  A9 2C                lda #<300
+00E12E  1  A2 01                ldx #>300
+00E130  1  20 64 E1             jsr setx
+00E133  1  A9 24                lda #'$'
+00E135  1  8D 2C D3             sta VID+R_OUT
+00E138  1  AD 52 E7             lda load+1
+00E13B  1  20 AA E1             jsr hexout
+00E13E  1  AD 51 E7             lda load
+00E141  1  20 AA E1             jsr hexout
+00E144  1               @nosize:
+00E144  1  AD 4B E7             lda rowy                ; next row, 18 pixels down
+00E147  1  18                   clc
+00E148  1  69 12                adc #18
+00E14A  1  8D 4B E7             sta rowy
+00E14D  1  90 03                bcc @y
+00E14F  1  EE 4C E7             inc rowy+1
+00E152  1  AD 4C E7     @y:     lda rowy+1              ; below the window? stop (the clip rectangle
+00E155  1  C9 01                cmp #>320               ; cuts what is past its bottom anyway)
+00E157  1  90 08                bcc @more
+00E159  1  AD 4B E7             lda rowy
+00E15C  1  C9 40                cmp #<320
+00E15E  1  90 01                bcc @more
+00E160  1  60                   rts
+00E161  1  4C D5 E0     @more:  jmp @file
+00E164  1               
+00E164  1               ; X0 = XA (A low), Y0 = rowy
+00E164  1  8D 10 D3     setx:   sta VID+R_X0
+00E167  1  8E 1A D3             stx VID+R_X0H
+00E16A  1  AD 4B E7             lda rowy
+00E16D  1  8D 11 D3             sta VID+R_Y0
+00E170  1  AD 4C E7             lda rowy+1
+00E173  1  8D 1B D3             sta VID+R_Y0H
+00E176  1  60                   rts
+00E177  1               
+00E177  1               ; num as decimal through CHAROUT: Y = 0 for 5 digits, 2 for 3 digits
+00E177  1               decout:
+00E177  1  A2 30        @digit: ldx #'0'
+00E179  1  AD 4D E7     @sub:   lda num
+00E17C  1  38                   sec
+00E17D  1  F9 A0 E1             sbc p10lo,y
+00E180  1  8D 4F E7             sta tmp
+00E183  1  AD 4E E7             lda num+1
+00E186  1  F9 A5 E1             sbc p10hi,y
+00E189  1  90 0C                bcc @out
+00E18B  1  8D 4E E7             sta num+1
+00E18E  1  AD 4F E7             lda tmp
+00E191  1  8D 4D E7             sta num
+00E194  1  E8                   inx
+00E195  1  D0 E2                bne @sub
+00E197  1  8E 2C D3     @out:   stx VID+R_OUT
+00E19A  1  C8                   iny
+00E19B  1  C0 05                cpy #5
+00E19D  1  D0 D8                bne @digit
+00E19F  1  60                   rts
+00E1A0  1  10 E8 64 0A  p10lo:  .byte <10000, <1000, <100, <10, <1
+00E1A4  1  01           
+00E1A5  1  27 03 00 00  p10hi:  .byte >10000, >1000, >100, >10, >1
+00E1A9  1  00           
+00E1AA  1               
+00E1AA  1               ; A as 2 hex digits through CHAROUT
+00E1AA  1               hexout:
+00E1AA  1  48                   pha
+00E1AB  1  4A                   lsr
+00E1AC  1  4A                   lsr
+00E1AD  1  4A                   lsr
+00E1AE  1  4A                   lsr
+00E1AF  1  20 B5 E1             jsr @nib
+00E1B2  1  68                   pla
+00E1B3  1  29 0F                and #$0F
+00E1B5  1  C9 0A        @nib:   cmp #10
+00E1B7  1  90 02                bcc @dig
+00E1B9  1  69 06                adc #6                  ; carry set: +7
+00E1BB  1  69 30        @dig:   adc #'0'
+00E1BD  1  8D 2C D3             sta VID+R_OUT
+00E1C0  1  60                   rts
+00E1C1  1               
+00E1C1  1               ; --- mouse position in the menu bar ------------------------------------------------
+00E1C1  1               showxy:
+00E1C1  1  A9 00                lda #0
+00E1C3  1  8D 28 D3             sta VID+R_ROP
+00E1C6  1  8D 29 D3             sta VID+R_PATON
+00E1C9  1  A9 10                lda #S_OPAQUE
+00E1CB  1  8D 2B D3             sta VID+R_STYLE
+00E1CE  1  A9 08                lda #<520
+00E1D0  1  8D 10 D3             sta VID+R_X0
+00E1D3  1  A9 02                lda #>520
+00E1D5  1  8D 1A D3             sta VID+R_X0H
+00E1D8  1  A9 01                lda #1
+00E1DA  1  8D 11 D3             sta VID+R_Y0
+00E1DD  1  A9 00                lda #0
+00E1DF  1  8D 1B D3             sta VID+R_Y0H
+00E1E2  1  A9 58                lda #'X'
+00E1E4  1  8D 2C D3             sta VID+R_OUT
+00E1E7  1  AD 00 D5             lda MOUSEX
+00E1EA  1  8D 4D E7             sta num
+00E1ED  1  AD 01 D5             lda MOUSEX+1
+00E1F0  1  8D 4E E7             sta num+1
+00E1F3  1  A0 02                ldy #2
+00E1F5  1  20 77 E1             jsr decout
+00E1F8  1  A9 20                lda #' '
+00E1FA  1  8D 2C D3             sta VID+R_OUT
+00E1FD  1  A9 59                lda #'Y'
+00E1FF  1  8D 2C D3             sta VID+R_OUT
+00E202  1  AD 02 D5             lda MOUSEY
+00E205  1  8D 4D E7             sta num
+00E208  1  AD 03 D5             lda MOUSEY+1
+00E20B  1  8D 4E E7             sta num+1
+00E20E  1  A0 02                ldy #2
+00E210  1  4C 77 E1             jmp decout
+00E213  1               
+00E213  1               ; --- XOR rubber band: from where the left button went down to the mouse -------
+00E213  1               band:
+00E213  1  AD 42 E7             lda banding
+00E216  1  D0 32                bne @going
+00E218  1  AD 04 D5             lda BUTTONS             ; start?
+00E21B  1  29 01                and #1
+00E21D  1  F0 2A                beq @rts
+00E21F  1  AD 00 D5             lda MOUSEX              ; anchor = current = the mouse
+00E222  1  8D 43 E7             sta ax
+00E225  1  8D 47 E7             sta cx
+00E228  1  AD 01 D5             lda MOUSEX+1
+00E22B  1  8D 44 E7             sta ax+1
+00E22E  1  8D 48 E7             sta cx+1
+00E231  1  AD 02 D5             lda MOUSEY
+00E234  1  8D 45 E7             sta ay
+00E237  1  8D 49 E7             sta cy
+00E23A  1  AD 03 D5             lda MOUSEY+1
+00E23D  1  8D 46 E7             sta ay+1
+00E240  1  8D 4A E7             sta cy+1
+00E243  1  20 98 E2             jsr xorbox
+00E246  1  EE 42 E7             inc banding
+00E249  1  60           @rts:   rts
+00E24A  1  AD 04 D5     @going: lda BUTTONS
+00E24D  1  29 01                and #1
+00E24F  1  F0 3E                beq @end
+00E251  1  AD 00 D5             lda MOUSEX              ; moved?
+00E254  1  CD 47 E7             cmp cx
+00E257  1  D0 18                bne @move
+00E259  1  AD 01 D5             lda MOUSEX+1
+00E25C  1  CD 48 E7             cmp cx+1
+00E25F  1  D0 10                bne @move
+00E261  1  AD 02 D5             lda MOUSEY
+00E264  1  CD 49 E7             cmp cy
+00E267  1  D0 08                bne @move
+00E269  1  AD 03 D5             lda MOUSEY+1
+00E26C  1  CD 4A E7             cmp cy+1
+00E26F  1  F0 D8                beq @rts
+00E271  1  20 98 E2     @move:  jsr xorbox              ; rub out the old box (XOR twice = nothing)
+00E274  1  AD 00 D5             lda MOUSEX
+00E277  1  8D 47 E7             sta cx
+00E27A  1  AD 01 D5             lda MOUSEX+1
+00E27D  1  8D 48 E7             sta cx+1
+00E280  1  AD 02 D5             lda MOUSEY
+00E283  1  8D 49 E7             sta cy
+00E286  1  AD 03 D5             lda MOUSEY+1
+00E289  1  8D 4A E7             sta cy+1
+00E28C  1  4C 98 E2             jmp xorbox              ; the new one
+00E28F  1  20 98 E2     @end:   jsr xorbox              ; released: rub it out
+00E292  1  A9 00                lda #0
+00E294  1  8D 42 E7             sta banding
+00E297  1  60                   rts
+00E298  1               
+00E298  1               ; the box ax,ay - cx,cy in XOR
+00E298  1               xorbox:
+00E298  1  A9 03                lda #3                  ; XOR
+00E29A  1  8D 28 D3             sta VID+R_ROP
+00E29D  1  A9 00                lda #0
+00E29F  1  8D 29 D3             sta VID+R_PATON
+00E2A2  1  AD 43 E7             lda ax
+00E2A5  1  8D 10 D3             sta VID+R_X0
+00E2A8  1  AD 44 E7             lda ax+1
+00E2AB  1  8D 1A D3             sta VID+R_X0H
+00E2AE  1  AD 45 E7             lda ay
+00E2B1  1  8D 11 D3             sta VID+R_Y0
+00E2B4  1  AD 46 E7             lda ay+1
+00E2B7  1  8D 1B D3             sta VID+R_Y0H
+00E2BA  1  AD 47 E7             lda cx
+00E2BD  1  8D 12 D3             sta VID+R_X1
+00E2C0  1  AD 48 E7             lda cx+1
+00E2C3  1  8D 1C D3             sta VID+R_X1H
+00E2C6  1  AD 49 E7             lda cy
+00E2C9  1  8D 13 D3             sta VID+R_Y1
+00E2CC  1  AD 4A E7             lda cy+1
+00E2CF  1  8D 1D D3             sta VID+R_Y1H
+00E2D2  1  A9 01                lda #1
+00E2D4  1  8D 14 D3             sta VID+R_COL
+00E2D7  1  A9 04                lda #C_BOX
+00E2D9  1  8D 18 D3             sta VID+R_CMD
+00E2DC  1  A9 00                lda #0
+00E2DE  1  8D 28 D3             sta VID+R_ROP
+00E2E1  1  60                   rts
+00E2E2  1               
+00E2E2  1               ; --- the drawing ------------------------------------------------------------------------
+00E2E2  1               scene:
+00E2E2  1                       ; desktop: 50% grey (the power-on PATTERN), the whole page
+00E2E2  1  28 00 29 01          .byte R_ROP, 0, R_PATON, 1
+00E2E6  1  14 01 18 01          DCMD C_CLEAR, 1
+00E2EA  1  29 00                .byte R_PATON, 0
+00E2EC  1                       ; menu bar
+00E2EC  1  10 00 1A 00          DRECT 0, 0, 639, 18
+00E2F0  1  11 00 1B 00  
+00E2F4  1  12 7F 1C 02  
+00E2FC  1  14 00 18 05          DCMD C_BOXF, 0
+00E300  1  10 00 1A 00          DRECT 0, 19, 639, 19
+00E304  1  11 13 1B 00  
+00E308  1  12 7F 1C 02  
+00E310  1  14 01 18 03          DCMD C_LINE, 1
+00E314  1  10 08 1A 00          DTEXT 8, 1, S_BOLD, "mini6502"
+00E318  1  11 01 1B 00  
+00E31C  1  2B 01 2C 6D  
+00E32E  1  10 68 1A 00          DTEXT 104, 1, 0, "File   Edit   View   Special"
+00E332  1  11 01 1B 00  
+00E336  1  2B 00 2C 46  
+00E370  1                       ; the disk window
+00E370  1  28 00 29 00          DWINDOW 32, 44, 392, 330, "Disk"
+00E374  1  10 23 1A 00  
+00E378  1  11 2F 1B 00  
+00E40A  1  10 38 1A 00          DTEXT 56, 70, S_BOLD, "Name"
+00E40E  1  11 46 1B 00  
+00E412  1  2B 01 2C 4E  
+00E41C  1  10 EC 1A 00          DTEXT 236, 70, S_BOLD, " Size"
+00E420  1  11 46 1B 00  
+00E424  1  2B 01 2C 20  
+00E430  1  10 2C 1A 01          DTEXT 300, 70, S_BOLD, "Load"
+00E434  1  11 46 1B 00  
+00E438  1  2B 01 2C 4C  
+00E442  1  10 22 1A 00          DRECT 34, 90, 390, 90
+00E446  1  11 5A 1B 00  
+00E44A  1  12 86 1C 01  
+00E452  1  14 01 18 03          DCMD C_LINE, 1
+00E456  1  38 22 39 00          DCLIP 34, 92, 390, 328  ; the list stays inside the window
+00E45A  1  3A 5C 3B 00  
+00E45E  1  3C 86 3D 01  
+00E466  1  FF                   .byte D_END
+00E467  1               
+00E467  1               fullclip:
+00E467  1  38 00 39 00          DCLIP 0, 0, 639, 399
+00E46B  1  3A 00 3B 00  
+00E46F  1  3C 7F 3D 02  
+00E477  1                       ; the styles window
+00E477  1  28 00 29 00          DWINDOW 420, 70, 620, 300, "Styles"
+00E47B  1  10 A7 1A 01  
+00E47F  1  11 49 1B 00  
+00E515  1  10 B4 1A 01          DTEXT 436, 100, 0, "Plain text"
+00E519  1  11 64 1B 00  
+00E51D  1  2B 00 2C 50  
+00E533  1  10 B4 1A 01          DTEXT 436, 120, S_BOLD, "Bold text"
+00E537  1  11 78 1B 00  
+00E53B  1  2B 01 2C 42  
+00E54F  1  10 B4 1A 01          DTEXT 436, 140, S_UNDER, "Underlined"
+00E553  1  11 8C 1B 00  
+00E557  1  2B 02 2C 55  
+00E56D  1  10 B4 1A 01          DTEXT 436, 160, S_ITALIC, "Italic text"
+00E571  1  11 A0 1B 00  
+00E575  1  2B 04 2C 49  
+00E58D  1  10 B4 1A 01          DTEXT 436, 180, S_INV, "Inverse"
+00E591  1  11 B4 1B 00  
+00E595  1  2B 08 2C 49  
+00E5A5  1  10 B4 1A 01          DTEXT 436, 200, S_BOLD+S_UNDER, "Bold+under"
+00E5A9  1  11 C8 1B 00  
+00E5AD  1  2B 03 2C 42  
+00E5C3  1                       ; three fill patterns
+00E5C3  1  30 88 31 00          DPATTERN $88, $00, $22, $00, $88, $00, $22, $00
+00E5C7  1  32 22 33 00  
+00E5CB  1  34 88 35 00  
+00E5D3  1  29 01                .byte R_PATON, 1
+00E5D5  1  10 B4 1A 01          DRECT 436, 230, 484, 286
+00E5D9  1  11 E6 1B 00  
+00E5DD  1  12 E4 1C 01  
+00E5E5  1  14 01 18 05          DCMD C_BOXF, 1
+00E5E9  1  30 AA 31 55          DPATTERN $AA, $55, $AA, $55, $AA, $55, $AA, $55
+00E5ED  1  32 AA 33 55  
+00E5F1  1  34 AA 35 55  
+00E5F9  1  10 F0 1A 01          DRECT 496, 230, 544, 286
+00E5FD  1  11 E6 1B 00  
+00E601  1  12 20 1C 02  
+00E609  1  14 01 18 05          DCMD C_BOXF, 1
+00E60D  1  30 11 31 22          DPATTERN $11, $22, $44, $88, $11, $22, $44, $88
+00E611  1  32 44 33 88  
+00E615  1  34 11 35 22  
+00E61D  1  10 2C 1A 02          DRECT 556, 230, 604, 286
+00E621  1  11 E6 1B 00  
+00E625  1  12 5C 1C 02  
+00E62D  1  14 01 18 05          DCMD C_BOXF, 1
+00E631  1  29 00                .byte R_PATON, 0
+00E633  1  10 B4 1A 01          DRECT 436, 230, 484, 286
+00E637  1  11 E6 1B 00  
+00E63B  1  12 E4 1C 01  
+00E643  1  14 01 18 04          DCMD C_BOX, 1
+00E647  1  10 F0 1A 01          DRECT 496, 230, 544, 286
+00E64B  1  11 E6 1B 00  
+00E64F  1  12 20 1C 02  
+00E657  1  14 01 18 04          DCMD C_BOX, 1
+00E65B  1  10 2C 1A 02          DRECT 556, 230, 604, 286
+00E65F  1  11 E6 1B 00  
+00E663  1  12 5C 1C 02  
+00E66B  1  14 01 18 04          DCMD C_BOX, 1
+00E66F  1                       ; icons on the desktop (STAMP sprite images 0 and 1)
+00E66F  1  10 C4 1A 01          DPOS 452, 330
+00E673  1  11 4A 1B 01  
+00E677  1  14 00 18 0A          DCMD C_STAMP, 0
+00E67B  1  10 B4 1A 01          DTEXT 436, 350, S_OPAQUE, "Disk"
+00E67F  1  11 5E 1B 01  
+00E683  1  2B 10 2C 44  
+00E68D  1  10 1C 1A 02          DPOS 540, 330
+00E691  1  11 4A 1B 01  
+00E695  1  14 01 18 0A          DCMD C_STAMP, 1
+00E699  1  10 04 1A 02          DTEXT 516, 350, S_OPAQUE, "Notes"
+00E69D  1  11 5E 1B 01  
+00E6A1  1  2B 10 2C 4E  
+00E6AD  1  10 08 1A 00          DTEXT 8, 380, S_OPAQUE, " Drag with the left button: XOR box.  Any key: back to text. "
+00E6B1  1  11 7C 1B 01  
+00E6B5  1  2B 10 2C 20  
+00E731  1  30 AA 31 55          DPATTERN $AA, $55, $AA, $55, $AA, $55, $AA, $55
+00E735  1  32 AA 33 55  
+00E739  1  34 AA 35 55  
+00E741  1  FF                   .byte D_END
+00E742  1               
+00E742  1  xx           banding: .res 1
+00E743  1  xx xx        ax:     .res 2
+00E745  1  xx xx        ay:     .res 2
+00E747  1  xx xx        cx:     .res 2
+00E749  1  xx xx        cy:     .res 2
+00E74B  1  xx xx        rowy:   .res 2
+00E74D  1  xx xx        num:    .res 2
+00E74F  1  xx           tmp:    .res 1
+00E750  1  xx           big:    .res 1
+00E751  1  xx xx        load:   .res 2
+00E753  1               
+00E753  1               iconimg:
+00E753  1                       .include "icons.inc"
+00E753  2               ; made by icons.py: 0 paper, 1 ink, $80 see-through
+00E753  2               ; disk
+00E753  2  01 01 01 01          .byte $01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$00
+00E757  2  01 01 01 01  
+00E75B  2  01 01 01 01  
+00E763  2  01 00 00 00          .byte $01,$00,$00,$00,$01,$00,$00,$00,$00,$00,$00,$01,$00,$00,$01,$01
+00E767  2  01 00 00 00  
+00E76B  2  00 00 00 01  
+00E773  2  01 00 00 00          .byte $01,$00,$00,$00,$01,$00,$00,$00,$00,$00,$00,$01,$00,$00,$00,$01
+00E777  2  01 00 00 00  
+00E77B  2  00 00 00 01  
+00E783  2  01 00 00 00          .byte $01,$00,$00,$00,$01,$00,$00,$00,$00,$00,$00,$01,$00,$00,$00,$01
+00E787  2  01 00 00 00  
+00E78B  2  00 00 00 01  
+00E793  2  01 00 00 00          .byte $01,$00,$00,$00,$01,$01,$01,$01,$01,$01,$01,$01,$00,$00,$00,$01
+00E797  2  01 01 01 01  
+00E79B  2  01 01 01 01  
+00E7A3  2  01 00 00 00          .byte $01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01
+00E7A7  2  00 00 00 00  
+00E7AB  2  00 00 00 00  
+00E7B3  2  01 00 00 00          .byte $01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01
+00E7B7  2  00 00 00 00  
+00E7BB  2  00 00 00 00  
+00E7C3  2  01 00 01 01          .byte $01,$00,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$00,$01
+00E7C7  2  01 01 01 01  
+00E7CB  2  01 01 01 01  
+00E7D3  2  01 00 01 00          .byte $01,$00,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00,$01
+00E7D7  2  00 00 00 00  
+00E7DB  2  00 00 00 00  
+00E7E3  2  01 00 01 00          .byte $01,$00,$01,$00,$01,$01,$01,$01,$01,$01,$01,$01,$00,$01,$00,$01
+00E7E7  2  01 01 01 01  
+00E7EB  2  01 01 01 01  
+00E7F3  2  01 00 01 00          .byte $01,$00,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00,$01
+00E7F7  2  00 00 00 00  
+00E7FB  2  00 00 00 00  
+00E803  2  01 00 01 00          .byte $01,$00,$01,$00,$01,$01,$01,$01,$01,$01,$01,$01,$00,$01,$00,$01
+00E807  2  01 01 01 01  
+00E80B  2  01 01 01 01  
+00E813  2  01 00 01 00          .byte $01,$00,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00,$01
+00E817  2  00 00 00 00  
+00E81B  2  00 00 00 00  
+00E823  2  01 00 01 00          .byte $01,$00,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00,$01
+00E827  2  00 00 00 00  
+00E82B  2  00 00 00 00  
+00E833  2  01 01 01 01          .byte $01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01
+00E837  2  01 01 01 01  
+00E83B  2  01 01 01 01  
+00E843  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E847  2  80 80 80 80  
+00E84B  2  80 80 80 80  
+00E853  2               ; doc
+00E853  2  80 80 01 01          .byte $80,$80,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$80,$80,$80,$80
+00E857  2  01 01 01 01  
+00E85B  2  01 01 01 01  
+00E863  2  80 80 01 00          .byte $80,$80,$01,$00,$00,$00,$00,$00,$00,$00,$00,$01,$01,$00,$00,$80
+00E867  2  00 00 00 00  
+00E86B  2  00 00 00 01  
+00E873  2  80 80 01 00          .byte $80,$80,$01,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00,$01,$00,$00
+00E877  2  00 00 00 00  
+00E87B  2  00 00 00 01  
+00E883  2  80 80 01 00          .byte $80,$80,$01,$00,$01,$01,$01,$01,$01,$00,$00,$01,$01,$01,$01,$00
+00E887  2  01 01 01 01  
+00E88B  2  01 00 00 01  
+00E893  2  80 80 01 00          .byte $80,$80,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00
+00E897  2  00 00 00 00  
+00E89B  2  00 00 00 00  
+00E8A3  2  80 80 01 00          .byte $80,$80,$01,$00,$01,$01,$01,$01,$01,$01,$01,$01,$00,$00,$01,$00
+00E8A7  2  01 01 01 01  
+00E8AB  2  01 01 01 01  
+00E8B3  2  80 80 01 00          .byte $80,$80,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00
+00E8B7  2  00 00 00 00  
+00E8BB  2  00 00 00 00  
+00E8C3  2  80 80 01 00          .byte $80,$80,$01,$00,$01,$01,$01,$01,$01,$01,$01,$01,$00,$00,$01,$00
+00E8C7  2  01 01 01 01  
+00E8CB  2  01 01 01 01  
+00E8D3  2  80 80 01 00          .byte $80,$80,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00
+00E8D7  2  00 00 00 00  
+00E8DB  2  00 00 00 00  
+00E8E3  2  80 80 01 00          .byte $80,$80,$01,$00,$01,$01,$01,$01,$01,$01,$01,$01,$00,$00,$01,$00
+00E8E7  2  01 01 01 01  
+00E8EB  2  01 01 01 01  
+00E8F3  2  80 80 01 00          .byte $80,$80,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00
+00E8F7  2  00 00 00 00  
+00E8FB  2  00 00 00 00  
+00E903  2  80 80 01 00          .byte $80,$80,$01,$00,$01,$01,$01,$01,$01,$00,$00,$00,$00,$00,$01,$00
+00E907  2  01 01 01 01  
+00E90B  2  01 00 00 00  
+00E913  2  80 80 01 00          .byte $80,$80,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$00
+00E917  2  00 00 00 00  
+00E91B  2  00 00 00 00  
+00E923  2  80 80 01 01          .byte $80,$80,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$00
+00E927  2  01 01 01 01  
+00E92B  2  01 01 01 01  
+00E933  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E937  2  80 80 80 80  
+00E93B  2  80 80 80 80  
+00E943  2  80 80 80 80          .byte $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+00E947  2  80 80 80 80  
+00E94B  2  80 80 80 80  
+00E953  2               
+00E953  1               iconend:
+00E953  1               
