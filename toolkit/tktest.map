@@ -1,0 +1,26 @@
+Modules list:
+-------------
+tktest.o:
+    CODE              Offs=000000  Size=0007A1  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  00E000  00E7A0  0007A1  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

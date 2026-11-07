@@ -1,0 +1,1867 @@
+ca65 V2.19 - Git 52727a5
+Main file   : tk2.asm
+Current file: tk2.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; tk2.asm - mini6502 desktop toolkit, bank $11: menus and dialogs
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain. Called from bank $10 (tk1.asm) through the jump table.
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1                       .include "tk.inc"
+000000r 2               ;=============================================================================
+000000r 2               ; tk.inc - mini6502 desktop toolkit: shared definitions (both toolkit banks)
+000000r 2               ;-----------------------------------------------------------------------------
+000000r 2               ; Public domain. See README.txt for the programming interface.
+000000r 2               ;=============================================================================
+000000r 2               
+000000r 2               TKBANK1 = $10           ; dispatcher, windows, events
+000000r 2               TKBANK2 = $11           ; menus, dialogs
+000000r 2               SWAPBANK = $D0          ; the caller's RAM ($0000-$CBFF) while the desktop runs
+000000r 2               
+000000r 2               ; --- function numbers (A when calling TOOL = $CC88) --------------------------
+000000r 2               TK_INIT     = 0
+000000r 2               TK_EXIT     = 1
+000000r 2               TK_MENUBAR  = 2
+000000r 2               TK_MENUITEM = 3
+000000r 2               TK_OPENWIN  = 4
+000000r 2               TK_CLOSEWIN = 5
+000000r 2               TK_GETEVENT = 6
+000000r 2               TK_POLLEVENT = 7
+000000r 2               TK_SETPORT  = 8
+000000r 2               TK_ALERT    = 9
+000000r 2               TK_ASK      = 10
+000000r 2               TK_TEXT     = 11
+000000r 2               TK_INVAL    = 12
+000000r 2               TK_FRONT    = 13
+000000r 2               TK_CLEAR    = 14
+000000r 2               TK_SETTITLE = 15
+000000r 2               TK_LAST     = 15
+000000r 2               
+000000r 2               ; --- events (A after GETEVENT / POLLEVENT) ---------------------------------------
+000000r 2               EV_NONE   = 0
+000000r 2               EV_KEY    = 1           ; X = character (0: Y = KBDEXT code)
+000000r 2               EV_MENU   = 2           ; X = menu, Y = item
+000000r 2               EV_CLICK  = 3           ; X = window ($FF desktop), Y = buttons (+$80 double), r0/r1 = x/y
+000000r 2               EV_UPDATE = 4           ; X = window: draw its contents (clip already set)
+000000r 2               EV_CLOSE  = 5           ; X = window: its close box was clicked
+000000r 2               EV_WHEEL  = 6           ; X = front window ($FF none), Y = steps (signed)
+000000r 2               
+000000r 2               ; --- hardware ------------------------------------------------------------------------
+000000r 2               FRAME   = $D001
+000000r 2               KBD     = $D010
+000000r 2               KBDCR   = $D011
+000000r 2               KBDEXT  = $D019
+000000r 2               BANK    = $D020
+000000r 2               DMASRC  = $D210         ; DMA: source, destination, length
+000000r 2               DMACMD  = $D219
+000000r 2               PBADR   = $D208         ; port B (the toolkit's): address, data, step
+000000r 2               PBDATA  = $D20B
+000000r 2               PBSTEP  = $D20C
+000000r 2               MODE    = $D300
+000000r 2               SHOW    = $D301
+000000r 2               DRAW    = $D302
+000000r 2               BX0     = $D310
+000000r 2               BY0     = $D311
+000000r 2               BX1     = $D312
+000000r 2               BY1     = $D313
+000000r 2               BCOL    = $D314
+000000r 2               BDX     = $D315
+000000r 2               BDY     = $D316
+000000r 2               BSRC    = $D317
+000000r 2               BCMD    = $D318
+000000r 2               BX0H    = $D31A
+000000r 2               BY0H    = $D31B
+000000r 2               BX1H    = $D31C
+000000r 2               BY1H    = $D31D
+000000r 2               BDXH    = $D31E
+000000r 2               BDYH    = $D31F
+000000r 2               ROP     = $D328
+000000r 2               PATON   = $D329
+000000r 2               STYLE   = $D32B
+000000r 2               CHOUT   = $D32C
+000000r 2               PATTERN = $D330
+000000r 2               CLIPR   = $D338
+000000r 2               MOUSEX  = $D500
+000000r 2               MOUSEY  = $D502
+000000r 2               BUTTONS = $D504
+000000r 2               WHEEL   = $D505
+000000r 2               CLICKS  = $D506
+000000r 2               PTR     = $D508
+000000r 2               
+000000r 2               C_CLEAR = 1
+000000r 2               C_LINE  = 3
+000000r 2               C_BOX   = 4
+000000r 2               C_BOXF  = 5
+000000r 2               C_COPY  = 6
+000000r 2               C_STAMP = 10
+000000r 2               R_SET   = 0
+000000r 2               R_XOR   = 3
+000000r 2               R_INV   = 4
+000000r 2               S_BOLD  = 1
+000000r 2               S_UNDER = 2
+000000r 2               S_INV   = 8
+000000r 2               S_OPAQUE = 16
+000000r 2               
+000000r 2               ; --- zero page -----------------------------------------------------------------------
+000000r 2               r0      = $02           ; r0-r15: arguments and results, 2 bytes each
+000000r 2               r1      = $04
+000000r 2               r2      = $06
+000000r 2               r3      = $08
+000000r 2               r4      = $0A
+000000r 2               r5      = $0C
+000000r 2               RX0     = $22           ; the rectangle the drawing helpers use
+000000r 2               RY0     = $24
+000000r 2               RX1     = $26
+000000r 2               RY1     = $28
+000000r 2               DX0     = $2A           ; damage rectangle (redraw pass)
+000000r 2               DY0     = $2C
+000000r 2               DX1     = $2E
+000000r 2               DY1     = $30
+000000r 2               TP      = $32           ; text pointer
+000000r 2               QP      = $34           ; second pointer
+000000r 2               T0      = $36           ; temporaries
+000000r 2               T1      = $38
+000000r 2               T2      = $3A
+000000r 2               T3      = $3C
+000000r 2               WP      = $3E           ; pointer to a window record
+000000r 2               CBANK   = $40           ; the caller's bank (set by the dispatcher)
+000000r 2               EVX     = $41           ; event being returned: X, Y
+000000r 2               EVY     = $42
+000000r 2               TMPB    = $43
+000000r 2               TMPC    = $44
+000000r 2               MX      = $46           ; mouse position, 2 bytes each
+000000r 2               MY      = $48
+000000r 2               NUMW    = $4A           ; number of windows open
+000000r 2               FRONTW  = $4B           ; window in front ($FF none)
+000000r 2               PASSON  = $4C           ; nonzero: a redraw pass is going on
+000000r 2               PEND    = $4D           ; windows still to redraw (bit per window)
+000000r 2               UPDW    = $4E           ; window of the UPDATE being drawn ($FF none)
+000000r 2               NMENU   = $4F           ; menus in the bar
+000000r 2               DAMAGE  = $50           ; nonzero: DX0..DY1 must be redrawn
+000000r 2               
+000000r 2               ; --- fixed RAM ----------------------------------------------------------------------
+000000r 2               WINREC  = $0200         ; 8 window records of 32 bytes
+000000r 2               W_USED  = 0             ;  1 if open
+000000r 2               W_X0    = 1             ;  outer rectangle (the shadow is 2 more right/down)
+000000r 2               W_Y0    = 3
+000000r 2               W_X1    = 5
+000000r 2               W_Y1    = 7
+000000r 2               W_TITLE = 9             ;  title, up to 22 characters + 0
+000000r 2               ZORDER  = $0300         ; window numbers, back to front (NUMW of them)
+000000r 2               MTL     = $0308         ; menu: title address, low / high (8 + 8)
+000000r 2               MTH     = $0310
+000000r 2               MFIRST  = $0318         ; menu: first item number (8)
+000000r 2               MCOUNT  = $0320         ; menu: number of items (8)
+000000r 2               MXL     = $0328         ; menu: title x position, low / high (8 + 8)
+000000r 2               MXH     = $0330
+000000r 2               MWIDTH  = $0338         ; menu: width of its box in characters (8)
+000000r 2               IPL     = $0340         ; item: text address, low / high (64 + 64)
+000000r 2               IPH     = $0380
+000000r 2               IFLAG   = $03C0         ; item: 1 enabled, 2 separator (64)
+000000r 2               IKEY    = $0400         ; item: Ctrl+key shortcut letter, 0 none (64)
+000000r 2               MTEXT   = $0480         ; menu texts
+000000r 2               MTEXTEND = $07FE
+000000r 2               MAGIC   = $07FE         ; "TK" while a toolkit program runs
+000000r 2               STRBUF  = $C000         ; strings copied from the caller (dialogs)
+000000r 2               STRBUF2 = $C100
+000000r 2               ASKBUF  = $C200
+000000r 2               
+000000r 2               MAXWIN  = 8
+000000r 2               MAXMENU = 8
+000000r 2               MAXITEM = 64
+000000r 2               TITLEH  = 19            ; window title bar: rows y0..y0+18, line at y0+19
+000000r 2               MENUH   = 19            ; menu bar: rows 0..18, line at 19
+000000r 2               
+000000r 2               ; --- helpers ---------------------------------------------------------------------------
+000000r 2               .macro  LDW dst, val            ; dst = 16-bit constant
+000000r 2                       lda #<(val)
+000000r 2                       sta dst
+000000r 2                       lda #>(val)
+000000r 2                       sta dst+1
+000000r 2               .endmacro
+000000r 2               .macro  MOVW dst, src           ; dst = src (16-bit)
+000000r 2                       lda src
+000000r 2                       sta dst
+000000r 2                       lda src+1
+000000r 2                       sta dst+1
+000000r 2               .endmacro
+000000r 2               .macro  ADDW dst, src, val      ; dst = src + constant
+000000r 2                       lda src
+000000r 2                       clc
+000000r 2                       adc #<(val)
+000000r 2                       sta dst
+000000r 2                       lda src+1
+000000r 2                       adc #>(val)
+000000r 2                       sta dst+1
+000000r 2               .endmacro
+000000r 2               .macro  SUBW dst, src, val      ; dst = src - constant
+000000r 2                       lda src
+000000r 2                       sec
+000000r 2                       sbc #<(val)
+000000r 2                       sta dst
+000000r 2                       lda src+1
+000000r 2                       sbc #>(val)
+000000r 2                       sta dst+1
+000000r 2               .endmacro
+000000r 2               .macro  FAR bank, addr          ; call into another bank: returns to whoever
+000000r 2                                               ; called the routine this is in (use it as
+000000r 2                                               ; the whole body of a routine called by JSR)
+000000r 2                       jsr $FFD0
+000000r 2                       .byte bank
+000000r 2                       .word addr
+000000r 2               .endmacro
+000000r 2               
+000000r 1               
+000000r 1                       .org $E000
+00E000  1               
+00E000  1  4C 12 E0             jmp m_setbar            ; $E000
+00E003  1  4C F2 E1             jmp m_item              ; $E003
+00E006  1  4C 46 E2             jmp m_track             ; $E006
+00E009  1  4C 0C E2             jmp m_key               ; $E009
+00E00C  1  4C FD E5             jmp d_alert             ; $E00C
+00E00F  1  4C 0B E6             jmp d_ask               ; $E00F
+00E012  1               
+00E012  1               ; --- menus ---------------------------------------------------------------------------------
+00E012  1               ; Definition (caller's memory): for each menu its title, 0, then its items,
+00E012  1               ; each ending with 0, then an empty item (a lone 0); after the last menu an
+00E012  1               ; empty title. Item "-" is a separator line; an item starting with "(" is
+00E012  1               ; disabled; an item ending with "/X" has the shortcut Ctrl+X.
+00E012  1               
+00E012  1               m_setbar:
+00E012  1  A5 02 85 36          MOVW T0, r0
+00E016  1  A5 03 85 37  
+00E01A  1  20 A5 ED             jsr farptr
+00E01D  1  A9 80 85 34          LDW QP, MTEXT
+00E021  1  A9 04 85 35  
+00E025  1  A9 00                lda #0
+00E027  1  85 4F                sta NMENU
+00E029  1  8D F2 ED             sta NITEM
+00E02C  1  A6 4F        @menu:  ldx NMENU
+00E02E  1  A5 34                lda QP                  ; the title
+00E030  1  9D 08 03             sta MTL,x
+00E033  1  A5 35                lda QP+1
+00E035  1  9D 10 03             sta MTH,x
+00E038  1  20 22 E1             jsr getstr
+00E03B  1  D0 03                bne @t
+00E03D  1  4C E7 E0             jmp @done               ; empty title: the end
+00E040  1  8C F3 ED     @t:     sty TLEN
+00E043  1  C8                   iny                     ; width so far: the title + 2
+00E044  1  C8                   iny
+00E045  1  98                   tya
+00E046  1  A6 4F                ldx NMENU
+00E048  1  9D 38 03             sta MWIDTH,x
+00E04B  1  AD F2 ED             lda NITEM
+00E04E  1  9D 18 03             sta MFIRST,x
+00E051  1  A9 00                lda #0
+00E053  1  9D 20 03             sta MCOUNT,x
+00E056  1  20 3D E1             jsr advance
+00E059  1  AE F2 ED     @item:  ldx NITEM
+00E05C  1  A5 34                lda QP
+00E05E  1  9D 40 03             sta IPL,x
+00E061  1  A5 35                lda QP+1
+00E063  1  9D 80 03             sta IPH,x
+00E066  1  A9 01                lda #1
+00E068  1  9D C0 03             sta IFLAG,x
+00E06B  1  A9 00                lda #0
+00E06D  1  9D 00 04             sta IKEY,x
+00E070  1  20 22 E1             jsr getstr
+00E073  1  D0 0E                bne @i
+00E075  1  20 3D E1             jsr advance             ; empty: the end of this menu's items
+00E078  1  E6 4F                inc NMENU
+00E07A  1  A5 4F                lda NMENU
+00E07C  1  C9 08                cmp #MAXMENU
+00E07E  1  D0 AC                bne @menu
+00E080  1  4C E7 E0             jmp @done
+00E083  1  8C F3 ED     @i:     sty TLEN
+00E086  1  A0 00                ldy #0
+00E088  1  B1 34                lda (QP),y
+00E08A  1  C9 2D                cmp #'-'                ; separator
+00E08C  1  D0 0C                bne @dis
+00E08E  1  C8                   iny
+00E08F  1  B1 34                lda (QP),y
+00E091  1  D0 07                bne @dis
+00E093  1  A9 02                lda #2
+00E095  1  9D C0 03             sta IFLAG,x
+00E098  1  D0 1B                bne @wid
+00E09A  1  A0 00        @dis:   ldy #0
+00E09C  1  B1 34                lda (QP),y
+00E09E  1  C9 28                cmp #'('                ; disabled: "(" not shown
+00E0A0  1  D0 10                bne @key
+00E0A2  1  A9 00                lda #0
+00E0A4  1  9D C0 03             sta IFLAG,x
+00E0A7  1  FE 40 03             inc IPL,x
+00E0AA  1  D0 03                bne @k0
+00E0AC  1  FE 80 03             inc IPH,x
+00E0AF  1  CE F3 ED     @k0:    dec TLEN
+00E0B2  1  20 ED E0     @key:   jsr shortcut            ; "/X" at the end
+00E0B5  1  AD F3 ED     @wid:   lda TLEN                ; width: text + 6 (+4 for "^X")
+00E0B8  1  18                   clc
+00E0B9  1  69 02                adc #2
+00E0BB  1  BC 00 04             ldy IKEY,x
+00E0BE  1  F0 02                beq @w
+00E0C0  1  69 04                adc #4
+00E0C2  1  A4 4F        @w:     ldy NMENU
+00E0C4  1  D9 38 03             cmp MWIDTH,y
+00E0C7  1  90 03                bcc @nw
+00E0C9  1  99 38 03             sta MWIDTH,y
+00E0CC  1  A4 4F        @nw:    ldy NMENU
+00E0CE  1  B9 20 03             lda MCOUNT,y
+00E0D1  1  18                   clc
+00E0D2  1  69 01                adc #1
+00E0D4  1  99 20 03             sta MCOUNT,y
+00E0D7  1  20 3D E1             jsr advance
+00E0DA  1  EE F2 ED             inc NITEM
+00E0DD  1  AD F2 ED             lda NITEM
+00E0E0  1  C9 40                cmp #MAXITEM
+00E0E2  1  B0 03                bcs @done
+00E0E4  1  4C 59 E0             jmp @item
+00E0E7  1  20 49 E1     @done:  jsr layout
+00E0EA  1  4C 91 E1             jmp m_drawbar
+00E0ED  1               
+00E0ED  1               ; Looks for "/X" at the end of item X's text (TLEN characters from IPL/IPH)
+00E0ED  1               shortcut:
+00E0ED  1  BD 40 03             lda IPL,x
+00E0F0  1  85 32                sta TP
+00E0F2  1  BD 80 03             lda IPH,x
+00E0F5  1  85 33                sta TP+1
+00E0F7  1  AC F3 ED             ldy TLEN
+00E0FA  1  C0 02                cpy #2
+00E0FC  1  90 23                bcc @no
+00E0FE  1  88                   dey
+00E0FF  1  88                   dey
+00E100  1  B1 32                lda (TP),y
+00E102  1  C9 2F                cmp #'/'
+00E104  1  D0 1B                bne @no
+00E106  1  C8                   iny
+00E107  1  B1 32                lda (TP),y
+00E109  1  29 DF                and #$DF                ; upper case
+00E10B  1  C9 41                cmp #'A'
+00E10D  1  90 12                bcc @no
+00E10F  1  C9 5B                cmp #'Z'+1
+00E111  1  B0 0E                bcs @no
+00E113  1  9D 00 04             sta IKEY,x
+00E116  1  88                   dey
+00E117  1  A9 00                lda #0                  ; the "/X" is not shown
+00E119  1  91 32                sta (TP),y
+00E11B  1  CE F3 ED             dec TLEN
+00E11E  1  CE F3 ED             dec TLEN
+00E121  1  60           @no:    rts
+00E122  1               
+00E122  1               ; Copies the next string from port B to QP (with its 0); Y = its length,
+00E122  1               ; Z set if empty. Stops at the end of MTEXT.
+00E122  1  A0 00        getstr: ldy #0
+00E124  1  A5 35        @l:     lda QP+1
+00E126  1  C9 07                cmp #>MTEXTEND
+00E128  1  B0 0A                bcs @full
+00E12A  1  AD 0B D2             lda PBDATA
+00E12D  1  91 34                sta (QP),y
+00E12F  1  F0 07                beq @e
+00E131  1  C8                   iny
+00E132  1  D0 F0                bne @l
+00E134  1  A9 00        @full:  lda #0
+00E136  1  91 34                sta (QP),y
+00E138  1  84 3A        @e:     sty T2                  ; (Y and the Z flag for the caller)
+00E13A  1  C0 00                cpy #0
+00E13C  1  60                   rts
+00E13D  1               
+00E13D  1               ; QP moves past the string just copied (T2 + 1)
+00E13D  1               advance:
+00E13D  1  A5 34                lda QP
+00E13F  1  38                   sec
+00E140  1  65 3A                adc T2
+00E142  1  85 34                sta QP
+00E144  1  90 02                bcc @r
+00E146  1  E6 35                inc QP+1
+00E148  1  60           @r:     rts
+00E149  1               
+00E149  1               ; Title positions: from x = 8, each title " title " wide
+00E149  1  A9 08 85 36  layout: LDW T0, 8
+00E14D  1  A9 00 85 37  
+00E151  1  A2 00                ldx #0
+00E153  1  E4 4F        @l:     cpx NMENU
+00E155  1  F0 23                beq @e
+00E157  1  A5 36                lda T0
+00E159  1  9D 28 03             sta MXL,x
+00E15C  1  A5 37                lda T0+1
+00E15E  1  9D 30 03             sta MXH,x
+00E161  1  20 7B E1             jsr titlelen            ; + (length + 2) * 8
+00E164  1  18                   clc
+00E165  1  69 02                adc #2
+00E167  1  0A                   asl
+00E168  1  0A                   asl
+00E169  1  0A                   asl
+00E16A  1  90 02                bcc @a
+00E16C  1  E6 37                inc T0+1
+00E16E  1  18           @a:     clc
+00E16F  1  65 36                adc T0
+00E171  1  85 36                sta T0
+00E173  1  90 02                bcc @n
+00E175  1  E6 37                inc T0+1
+00E177  1  E8           @n:     inx
+00E178  1  D0 D9                bne @l
+00E17A  1  60           @e:     rts
+00E17B  1               
+00E17B  1               ; A = length of menu X's title (TP = it)
+00E17B  1               titlelen:
+00E17B  1  BD 08 03             lda MTL,x
+00E17E  1  85 32                sta TP
+00E180  1  BD 10 03             lda MTH,x
+00E183  1  85 33                sta TP+1
+00E185  1  8A                   txa
+00E186  1  48                   pha
+00E187  1  20 B5 EC             jsr strlen
+00E18A  1  85 44                sta TMPC
+00E18C  1  68                   pla
+00E18D  1  AA                   tax
+00E18E  1  A5 44                lda TMPC
+00E190  1  60                   rts
+00E191  1               
+00E191  1               ; The menu bar with the titles
+00E191  1               m_drawbar:
+00E191  1  20 70 EC             jsr clipfull
+00E194  1  A9 00                lda #0
+00E196  1  85 22                sta RX0
+00E198  1  85 23                sta RX0+1
+00E19A  1  85 24                sta RY0
+00E19C  1  85 25                sta RY0+1
+00E19E  1  85 29                sta RY1+1
+00E1A0  1  A9 7F 85 26          LDW RX1, 639
+00E1A4  1  A9 02 85 27  
+00E1A8  1  A9 12                lda #MENUH - 1
+00E1AA  1  85 28                sta RY1
+00E1AC  1  A9 00                lda #0
+00E1AE  1  20 11 EC             jsr fillrect
+00E1B1  1  A9 13                lda #MENUH
+00E1B3  1  85 24                sta RY0
+00E1B5  1  85 28                sta RY1
+00E1B7  1  A9 01                lda #1
+00E1B9  1  20 11 EC             jsr fillrect
+00E1BC  1  A9 00                lda #0
+00E1BE  1  8D 2B D3             sta STYLE
+00E1C1  1  A2 00                ldx #0
+00E1C3  1  E4 4F        @t:     cpx NMENU
+00E1C5  1  F0 29                beq @e
+00E1C7  1  86 43                stx TMPB
+00E1C9  1  BD 28 03             lda MXL,x
+00E1CC  1  18                   clc
+00E1CD  1  69 08                adc #8
+00E1CF  1  85 36                sta T0
+00E1D1  1  BD 30 03             lda MXH,x
+00E1D4  1  69 00                adc #0
+00E1D6  1  85 37                sta T0+1
+00E1D8  1  A9 01 85 38          LDW T1, 1
+00E1DC  1  A9 00 85 39  
+00E1E0  1  20 93 EC             jsr moveto
+00E1E3  1  A6 43                ldx TMPB
+00E1E5  1  20 7B E1             jsr titlelen
+00E1E8  1  20 A8 EC             jsr drawstr
+00E1EB  1  A6 43                ldx TMPB
+00E1ED  1  E8                   inx
+00E1EE  1  D0 D3                bne @t
+00E1F0  1  18           @e:     clc
+00E1F1  1  60                   rts
+00E1F2  1               
+00E1F2  1               ; MENUITEM: X = menu, Y = item, r0 = 0 disable / 1 enable
+00E1F2  1  E4 4F        m_item: cpx NMENU
+00E1F4  1  B0 14                bcs @r
+00E1F6  1  98                   tya
+00E1F7  1  18                   clc
+00E1F8  1  7D 18 03             adc MFIRST,x
+00E1FB  1  AA                   tax
+00E1FC  1  BD C0 03             lda IFLAG,x
+00E1FF  1  29 02                and #2
+00E201  1  D0 07                bne @r                  ; separators stay as they are
+00E203  1  A5 02                lda r0
+00E205  1  29 01                and #1
+00E207  1  9D C0 03             sta IFLAG,x
+00E20A  1  18           @r:     clc
+00E20B  1  60                   rts
+00E20C  1               
+00E20C  1               ; Ctrl+letter A (1-26): an enabled item with that shortcut? -> carry set,
+00E20C  1               ; X = menu, Y = item; else carry clear and A kept
+00E20C  1  85 43        m_key:  sta TMPB
+00E20E  1  18                   clc
+00E20F  1  69 40                adc #'A' - 1
+00E211  1  85 44                sta TMPC
+00E213  1  A2 00                ldx #0
+00E215  1  E4 4F        @m:     cpx NMENU
+00E217  1  F0 29                beq @no
+00E219  1  A0 00                ldy #0
+00E21B  1  98           @i:     tya
+00E21C  1  DD 20 03             cmp MCOUNT,x
+00E21F  1  F0 1E                beq @nm
+00E221  1  18                   clc
+00E222  1  7D 18 03             adc MFIRST,x
+00E225  1  86 3A                stx T2
+00E227  1  AA                   tax
+00E228  1  BD 00 04             lda IKEY,x
+00E22B  1  C5 44                cmp TMPC
+00E22D  1  D0 0B                bne @ni
+00E22F  1  BD C0 03             lda IFLAG,x
+00E232  1  29 01                and #1
+00E234  1  F0 04                beq @ni
+00E236  1  A6 3A                ldx T2
+00E238  1  38                   sec
+00E239  1  60                   rts
+00E23A  1  A6 3A        @ni:    ldx T2
+00E23C  1  C8                   iny
+00E23D  1  D0 DC                bne @i
+00E23F  1  E8           @nm:    inx
+00E240  1  D0 D3                bne @m
+00E242  1  A5 43        @no:    lda TMPB
+00E244  1  18                   clc
+00E245  1  60                   rts
+00E246  1               
+00E246  1               ; --- menu tracking: the left button went down in the menu bar --------------------------
+00E246  1               m_track:
+00E246  1  A9 FF                lda #$FF
+00E248  1  8D F4 ED             sta CURM
+00E24B  1  8D F5 ED             sta CURI
+00E24E  1  20 32 ED     @loop:  jsr readmouse
+00E251  1  A5 49                lda MY+1
+00E253  1  D0 1D                bne @notbar
+00E255  1  A5 48                lda MY
+00E257  1  C9 14                cmp #MENUH + 1
+00E259  1  B0 17                bcs @notbar
+00E25B  1  20 0B E3             jsr titleat             ; X = title under the mouse, or $FF
+00E25E  1  30 79                bmi @chk
+00E260  1  EC F4 ED             cpx CURM
+00E263  1  F0 74                beq @chk
+00E265  1  86 43                stx TMPB
+00E267  1  20 9C E5             jsr closemenu
+00E26A  1  A6 43                ldx TMPB
+00E26C  1  20 9D E3             jsr openmenu
+00E26F  1  4C D9 E2             jmp @chk
+00E272  1               @notbar:
+00E272  1  AD F4 ED             lda CURM
+00E275  1  30 62                bmi @chk
+00E277  1  20 20 E3             jsr menubox
+00E27A  1  20 47 ED             jsr inrect
+00E27D  1  90 52                bcc @out
+00E27F  1  A5 48                lda MY                  ; item = (MY - top - 2) / 16
+00E281  1  38                   sec
+00E282  1  E5 24                sbc RY0
+00E284  1  85 36                sta T0
+00E286  1  A5 49                lda MY+1
+00E288  1  E5 25                sbc RY0+1
+00E28A  1  85 37                sta T0+1
+00E28C  1  A5 36 38 E9          SUBW T0, T0, 2
+00E290  1  02 85 36 A5  
+00E294  1  37 E9 00 85  
+00E299  1  30 36                bmi @out
+00E29B  1  A2 04                ldx #4
+00E29D  1  46 37        @sh:    lsr T0+1
+00E29F  1  66 36                ror T0
+00E2A1  1  CA                   dex
+00E2A2  1  D0 F9                bne @sh
+00E2A4  1  A5 36                lda T0
+00E2A6  1  AE F4 ED             ldx CURM
+00E2A9  1  DD 20 03             cmp MCOUNT,x
+00E2AC  1  B0 23                bcs @out
+00E2AE  1  85 43                sta TMPB
+00E2B0  1  18                   clc
+00E2B1  1  7D 18 03             adc MFIRST,x
+00E2B4  1  AA                   tax
+00E2B5  1  BD C0 03             lda IFLAG,x
+00E2B8  1  29 01                and #1
+00E2BA  1  F0 15                beq @out
+00E2BC  1  A5 43                lda TMPB
+00E2BE  1  CD F5 ED             cmp CURI
+00E2C1  1  F0 16                beq @chk
+00E2C3  1  20 3F E5             jsr hiitem              ; off the old one
+00E2C6  1  A5 43                lda TMPB
+00E2C8  1  8D F5 ED             sta CURI
+00E2CB  1  20 3F E5             jsr hiitem              ; on the new one
+00E2CE  1  4C D9 E2             jmp @chk
+00E2D1  1  20 3F E5     @out:   jsr hiitem
+00E2D4  1  A9 FF                lda #$FF
+00E2D6  1  8D F5 ED             sta CURI
+00E2D9  1  AD 04 D5     @chk:   lda BUTTONS
+00E2DC  1  29 01                and #1
+00E2DE  1  F0 06                beq @up
+00E2E0  1  20 6E ED             jsr waitframe
+00E2E3  1  4C 4E E2             jmp @loop
+00E2E6  1  AD F5 ED     @up:    lda CURI
+00E2E9  1  8D F7 ED             sta SELI
+00E2EC  1  AD F4 ED             lda CURM
+00E2EF  1  8D F6 ED             sta SELM
+00E2F2  1  20 82 E5             jsr flash               ; the chosen item blinks
+00E2F5  1  20 9C E5             jsr closemenu
+00E2F8  1  AD 06 D5             lda CLICKS
+00E2FB  1  AE F6 ED             ldx SELM
+00E2FE  1  30 09                bmi @none
+00E300  1  AC F7 ED             ldy SELI
+00E303  1  C0 FF                cpy #$FF
+00E305  1  F0 02                beq @none
+00E307  1  38                   sec
+00E308  1  60                   rts
+00E309  1  18           @none:  clc
+00E30A  1  60                   rts
+00E30B  1               
+00E30B  1               ; X = menu whose title is under MX ($FF if none)
+00E30B  1               titleat:
+00E30B  1  A6 4F                ldx NMENU
+00E30D  1  CA           @l:     dex
+00E30E  1  30 0F                bmi @r
+00E310  1  A5 46                lda MX                  ; MX >= MXL/MXH ?
+00E312  1  DD 28 03             cmp MXL,x
+00E315  1  A5 47                lda MX+1
+00E317  1  FD 30 03             sbc MXH,x
+00E31A  1  B0 02                bcs @f
+00E31C  1  90 EF                bcc @l
+00E31E  1  8A           @f:     txa                     ; (N clear: found)
+00E31F  1  60           @r:     rts
+00E320  1               
+00E320  1               ; RX0..RY1 = the box of menu CURM
+00E320  1               menubox:
+00E320  1  AE F4 ED             ldx CURM
+00E323  1  BD 28 03             lda MXL,x
+00E326  1  85 22                sta RX0
+00E328  1  BD 30 03             lda MXH,x
+00E32B  1  85 23                sta RX0+1
+00E32D  1  A9 13 85 24          LDW RY0, MENUH
+00E331  1  A9 00 85 25  
+00E335  1  BD 38 03             lda MWIDTH,x            ; width * 8 + 8
+00E338  1  0A                   asl
+00E339  1  0A                   asl
+00E33A  1  0A                   asl
+00E33B  1  85 36                sta T0
+00E33D  1  A9 00                lda #0
+00E33F  1  2A                   rol
+00E340  1  85 37                sta T0+1
+00E342  1  A5 22                lda RX0
+00E344  1  18                   clc
+00E345  1  65 36                adc T0
+00E347  1  85 26                sta RX1
+00E349  1  A5 23                lda RX0+1
+00E34B  1  65 37                adc T0+1
+00E34D  1  85 27                sta RX1+1
+00E34F  1  A5 26 18 69          ADDW RX1, RX1, 8
+00E353  1  08 85 26 A5  
+00E357  1  27 69 00 85  
+00E35C  1  BD 20 03             lda MCOUNT,x            ; height: count * 16 + 4
+00E35F  1  0A                   asl
+00E360  1  0A                   asl
+00E361  1  0A                   asl
+00E362  1  0A                   asl
+00E363  1  18                   clc
+00E364  1  69 17                adc #MENUH + 4
+00E366  1  85 28                sta RY1
+00E368  1  A9 00                lda #0
+00E36A  1  69 00                adc #0
+00E36C  1  85 29                sta RY1+1
+00E36E  1  A5 27                lda RX1+1               ; keep it on the screen
+00E370  1  C9 02                cmp #>637
+00E372  1  90 28                bcc @ok
+00E374  1  A5 26                lda RX1
+00E376  1  C9 7D                cmp #<637
+00E378  1  90 22                bcc @ok
+00E37A  1  A5 26                lda RX1                 ; shift left by RX1 - 637
+00E37C  1  38                   sec
+00E37D  1  E9 7D                sbc #<637
+00E37F  1  85 36                sta T0
+00E381  1  A5 27                lda RX1+1
+00E383  1  E9 02                sbc #>637
+00E385  1  85 37                sta T0+1
+00E387  1  A5 22                lda RX0
+00E389  1  38                   sec
+00E38A  1  E5 36                sbc T0
+00E38C  1  85 22                sta RX0
+00E38E  1  A5 23                lda RX0+1
+00E390  1  E5 37                sbc T0+1
+00E392  1  85 23                sta RX0+1
+00E394  1  A9 7D 85 26          LDW RX1, 637
+00E398  1  A9 02 85 27  
+00E39C  1  60           @ok:    rts
+00E39D  1               
+00E39D  1               ; Opens menu X: title inverted, box drawn (what was under it saved)
+00E39D  1               openmenu:
+00E39D  1  8E F4 ED             stx CURM
+00E3A0  1  A9 FF                lda #$FF
+00E3A2  1  8D F5 ED             sta CURI
+00E3A5  1  20 BC E5             jsr titlerect
+00E3A8  1  20 52 EC             jsr invrect
+00E3AB  1  20 20 E3             jsr menubox
+00E3AE  1  20 D3 E3             jsr shadowed
+00E3B1  1  20 F1 EC             jsr saveunder
+00E3B4  1  20 20 E3             jsr menubox
+00E3B7  1  20 EE E3             jsr boxdraw
+00E3BA  1  AE F4 ED             ldx CURM                ; the items
+00E3BD  1  A9 00                lda #0
+00E3BF  1  85 44                sta TMPC
+00E3C1  1  AE F4 ED     @i:     ldx CURM
+00E3C4  1  A5 44                lda TMPC
+00E3C6  1  DD 20 03             cmp MCOUNT,x
+00E3C9  1  F0 07                beq @e
+00E3CB  1  20 4C E4             jsr drawitem
+00E3CE  1  E6 44                inc TMPC
+00E3D0  1  D0 EF                bne @i
+00E3D2  1  60           @e:     rts
+00E3D3  1               
+00E3D3  1               ; RX1, RY1 += 2 (the shadow)
+00E3D3  1               shadowed:
+00E3D3  1  A5 26 18 69          ADDW RX1, RX1, 2
+00E3D7  1  02 85 26 A5  
+00E3DB  1  27 69 00 85  
+00E3E0  1  A5 28 18 69          ADDW RY1, RY1, 2
+00E3E4  1  02 85 28 A5  
+00E3E8  1  29 69 00 85  
+00E3ED  1  60                   rts
+00E3EE  1               
+00E3EE  1               ; Box RX0..RY1 with a shadow: white, framed
+00E3EE  1               boxdraw:
+00E3EE  1  20 D3 E3             jsr shadowed
+00E3F1  1  A5 22 18 69          ADDW RX0, RX0, 2
+00E3F5  1  02 85 22 A5  
+00E3F9  1  23 69 00 85  
+00E3FE  1  A5 24 18 69          ADDW RY0, RY0, 2
+00E402  1  02 85 24 A5  
+00E406  1  25 69 00 85  
+00E40B  1  A9 01                lda #1
+00E40D  1  20 11 EC             jsr fillrect
+00E410  1  A5 22 38 E9          SUBW RX0, RX0, 2
+00E414  1  02 85 22 A5  
+00E418  1  23 E9 00 85  
+00E41D  1  A5 24 38 E9          SUBW RY0, RY0, 2
+00E421  1  02 85 24 A5  
+00E425  1  25 E9 00 85  
+00E42A  1  A5 26 38 E9          SUBW RX1, RX1, 2
+00E42E  1  02 85 26 A5  
+00E432  1  27 E9 00 85  
+00E437  1  A5 28 38 E9          SUBW RY1, RY1, 2
+00E43B  1  02 85 28 A5  
+00E43F  1  29 E9 00 85  
+00E444  1  A9 00                lda #0
+00E446  1  20 11 EC             jsr fillrect
+00E449  1  4C 27 EC             jmp framerect
+00E44C  1               
+00E44C  1               ; Item TMPC of menu CURM
+00E44C  1               drawitem:
+00E44C  1  20 20 E3             jsr menubox
+00E44F  1  A5 44                lda TMPC
+00E451  1  0A                   asl
+00E452  1  0A                   asl
+00E453  1  0A                   asl
+00E454  1  0A                   asl
+00E455  1  18                   clc
+00E456  1  69 15                adc #MENUH + 2
+00E458  1  85 38                sta T1
+00E45A  1  A9 00                lda #0
+00E45C  1  85 39                sta T1+1
+00E45E  1  AE F4 ED             ldx CURM
+00E461  1  A5 44                lda TMPC
+00E463  1  18                   clc
+00E464  1  7D 18 03             adc MFIRST,x
+00E467  1  AA                   tax
+00E468  1  86 3A                stx T2
+00E46A  1  BD C0 03             lda IFLAG,x
+00E46D  1  29 02                and #2
+00E46F  1  F0 2C                beq @text
+00E471  1  A5 38                lda T1                  ; separator: a grey line across
+00E473  1  18                   clc
+00E474  1  69 08                adc #8
+00E476  1  85 24                sta RY0
+00E478  1  85 28                sta RY1
+00E47A  1  A9 00                lda #0
+00E47C  1  85 25                sta RY0+1
+00E47E  1  85 29                sta RY1+1
+00E480  1  A5 22 18 69          ADDW RX0, RX0, 1
+00E484  1  01 85 22 A5  
+00E488  1  23 69 00 85  
+00E48D  1  A5 26 38 E9          SUBW RX1, RX1, 1
+00E491  1  01 85 26 A5  
+00E495  1  27 E9 00 85  
+00E49A  1  4C 3F EC             jmp patrect
+00E49D  1  A5 22 18 69  @text:  ADDW T0, RX0, 8
+00E4A1  1  08 85 36 A5  
+00E4A5  1  23 69 00 85  
+00E4AA  1  20 93 EC             jsr moveto
+00E4AD  1  A9 00                lda #0
+00E4AF  1  8D 2B D3             sta STYLE
+00E4B2  1  A9 00                lda #R_SET
+00E4B4  1  8D 28 D3             sta ROP
+00E4B7  1  A6 3A                ldx T2
+00E4B9  1  BD 40 03             lda IPL,x
+00E4BC  1  85 32                sta TP
+00E4BE  1  BD 80 03             lda IPH,x
+00E4C1  1  85 33                sta TP+1
+00E4C3  1  20 A8 EC             jsr drawstr
+00E4C6  1  A6 3A                ldx T2
+00E4C8  1  BD 00 04             lda IKEY,x              ; "^X" at the right
+00E4CB  1  F0 1D                beq @dim
+00E4CD  1  A5 26 38 E9          SUBW T0, RX1, 24
+00E4D1  1  18 85 36 A5  
+00E4D5  1  27 E9 00 85  
+00E4DA  1  20 93 EC             jsr moveto
+00E4DD  1  A9 5E                lda #'^'
+00E4DF  1  8D 2C D3             sta CHOUT
+00E4E2  1  A6 3A                ldx T2
+00E4E4  1  BD 00 04             lda IKEY,x
+00E4E7  1  8D 2C D3             sta CHOUT
+00E4EA  1  A6 3A        @dim:   ldx T2
+00E4EC  1  BD C0 03             lda IFLAG,x
+00E4EF  1  29 01                and #1
+00E4F1  1  D0 4B                bne @r
+00E4F3  1  A5 22 18 69          ADDW RX0, RX0, 1        ; disabled: half the ink taken out
+00E4F7  1  01 85 22 A5  
+00E4FB  1  23 69 00 85  
+00E500  1  A5 26 38 E9          SUBW RX1, RX1, 1
+00E504  1  01 85 26 A5  
+00E508  1  27 E9 00 85  
+00E50D  1  A5 38 85 24          MOVW RY0, T1
+00E511  1  A5 39 85 25  
+00E515  1  A5 38 18 69          ADDW RY1, T1, 15
+00E519  1  0F 85 28 A5  
+00E51D  1  39 69 00 85  
+00E522  1  A9 05                lda #5                  ; CLEAR where the pattern is 1
+00E524  1  8D 28 D3             sta ROP
+00E527  1  A9 01                lda #1
+00E529  1  8D 29 D3             sta PATON
+00E52C  1  20 E8 EB             jsr setrect
+00E52F  1  A9 05                lda #C_BOXF
+00E531  1  8D 18 D3             sta BCMD
+00E534  1  A9 00                lda #0
+00E536  1  8D 29 D3             sta PATON
+00E539  1  A9 00                lda #R_SET
+00E53B  1  8D 28 D3             sta ROP
+00E53E  1  60           @r:     rts
+00E53F  1               
+00E53F  1               ; Inverts item CURI (if any) of menu CURM
+00E53F  1  AD F5 ED     hiitem: lda CURI
+00E542  1  30 3D                bmi @r
+00E544  1  20 20 E3             jsr menubox
+00E547  1  AD F5 ED             lda CURI
+00E54A  1  0A                   asl
+00E54B  1  0A                   asl
+00E54C  1  0A                   asl
+00E54D  1  0A                   asl
+00E54E  1  18                   clc
+00E54F  1  69 15                adc #MENUH + 2
+00E551  1  85 24                sta RY0
+00E553  1  A9 00                lda #0
+00E555  1  85 25                sta RY0+1
+00E557  1  A5 24 18 69          ADDW RY1, RY0, 15
+00E55B  1  0F 85 28 A5  
+00E55F  1  25 69 00 85  
+00E564  1  A5 22 18 69          ADDW RX0, RX0, 1
+00E568  1  01 85 22 A5  
+00E56C  1  23 69 00 85  
+00E571  1  A5 26 38 E9          SUBW RX1, RX1, 1
+00E575  1  01 85 26 A5  
+00E579  1  27 E9 00 85  
+00E57E  1  4C 52 EC             jmp invrect
+00E581  1  60           @r:     rts
+00E582  1               
+00E582  1               ; The chosen item blinks twice
+00E582  1  AD F5 ED     flash:  lda CURI
+00E585  1  30 14                bmi @r
+00E587  1  A2 04                ldx #4
+00E589  1  8A           @f:     txa
+00E58A  1  48                   pha
+00E58B  1  20 3F E5             jsr hiitem
+00E58E  1  A0 04                ldy #4
+00E590  1  20 6E ED     @w:     jsr waitframe
+00E593  1  88                   dey
+00E594  1  D0 FA                bne @w
+00E596  1  68                   pla
+00E597  1  AA                   tax
+00E598  1  CA                   dex
+00E599  1  D0 EE                bne @f
+00E59B  1  60           @r:     rts
+00E59C  1               
+00E59C  1               ; Closes menu CURM: what was under it back, title normal again
+00E59C  1               closemenu:
+00E59C  1  AD F4 ED             lda CURM
+00E59F  1  30 1A                bmi @r
+00E5A1  1  20 20 E3             jsr menubox
+00E5A4  1  20 D3 E3             jsr shadowed
+00E5A7  1  20 FE EC             jsr restunder
+00E5AA  1  AE F4 ED             ldx CURM
+00E5AD  1  20 BC E5             jsr titlerect
+00E5B0  1  20 52 EC             jsr invrect
+00E5B3  1  A9 FF                lda #$FF
+00E5B5  1  8D F4 ED             sta CURM
+00E5B8  1  8D F5 ED             sta CURI
+00E5BB  1  60           @r:     rts
+00E5BC  1               
+00E5BC  1               ; RX0..RY1 = title X in the bar
+00E5BC  1               titlerect:
+00E5BC  1  BD 28 03             lda MXL,x
+00E5BF  1  85 22                sta RX0
+00E5C1  1  BD 30 03             lda MXH,x
+00E5C4  1  85 23                sta RX0+1
+00E5C6  1  20 7B E1             jsr titlelen
+00E5C9  1  18                   clc
+00E5CA  1  69 02                adc #2
+00E5CC  1  0A                   asl
+00E5CD  1  0A                   asl
+00E5CE  1  0A                   asl
+00E5CF  1  85 36                sta T0
+00E5D1  1  A9 00                lda #0
+00E5D3  1  2A                   rol
+00E5D4  1  85 37                sta T0+1
+00E5D6  1  A5 22                lda RX0
+00E5D8  1  18                   clc
+00E5D9  1  65 36                adc T0
+00E5DB  1  85 26                sta RX1
+00E5DD  1  A5 23                lda RX0+1
+00E5DF  1  65 37                adc T0+1
+00E5E1  1  85 27                sta RX1+1
+00E5E3  1  A5 26 38 E9          SUBW RX1, RX1, 1
+00E5E7  1  01 85 26 A5  
+00E5EB  1  27 E9 00 85  
+00E5F0  1  A9 00                lda #0
+00E5F2  1  85 24                sta RY0
+00E5F4  1  85 25                sta RY0+1
+00E5F6  1  85 29                sta RY1+1
+00E5F8  1  A9 12                lda #MENUH - 1
+00E5FA  1  85 28                sta RY1
+00E5FC  1  60                   rts
+00E5FD  1               
+00E5FD  1               ; --- dialogs ---------------------------------------------------------------------------------
+00E5FD  1               
+00E5FD  1               ; ALERT: r0 = message (lines separated by CR), r1 = buttons "OK|Cancel"
+00E5FD  1               ; (0 = just OK). Returns A = the button chosen (Enter = the first, Esc = the
+00E5FD  1               ; last).
+00E5FD  1               d_alert:
+00E5FD  1  A9 00                lda #0
+00E5FF  1  8D F8 ED             sta ASKING
+00E602  1  20 84 E6             jsr dlgtext
+00E605  1  20 34 E7             jsr dlgopen
+00E608  1  4C D7 EA             jmp dlgloop
+00E60B  1               
+00E60B  1               ; ASK: r0 = prompt, r1 = the caller's buffer (its text is shown first),
+00E60B  1               ; r2 = maximum length (1-40). Carry clear: OK, the buffer has the answer.
+00E60B  1  A9 01        d_ask:  lda #1
+00E60D  1  8D F8 ED             sta ASKING
+00E610  1  A5 06                lda r2
+00E612  1  F0 04                beq @m
+00E614  1  C9 29                cmp #41
+00E616  1  90 02                bcc @ok
+00E618  1  A9 28        @m:     lda #40
+00E61A  1  8D F9 ED     @ok:    sta ASKMAX
+00E61D  1  A5 04 85 36          MOVW T0, r1             ; the current text
+00E621  1  A5 05 85 37  
+00E625  1  A9 00 85 34          LDW QP, ASKBUF
+00E629  1  A9 C2 85 35  
+00E62D  1  AD F9 ED             lda ASKMAX
+00E630  1  20 D8 ED             jsr fetchstr
+00E633  1  20 84 E6             jsr dlgtext
+00E636  1  A9 7A                lda #<okcancel          ; buttons OK and Cancel
+00E638  1  85 32                sta TP
+00E63A  1  A9 E6                lda #>okcancel
+00E63C  1  85 33                sta TP+1
+00E63E  1  A0 00                ldy #0
+00E640  1  B1 32        @b:     lda (TP),y
+00E642  1  99 00 C1             sta STRBUF2,y
+00E645  1  F0 03                beq @bd
+00E647  1  C8                   iny
+00E648  1  D0 F6                bne @b
+00E64A  1  20 FD E6     @bd:    jsr splitbtn
+00E64D  1  20 34 E7             jsr dlgopen
+00E650  1  20 57 EA             jsr drawfield
+00E653  1  20 D7 EA             jsr dlgloop
+00E656  1  C9 00                cmp #0
+00E658  1  D0 1C                bne @cancel
+00E65A  1  A5 04 85 36          MOVW T0, r1             ; OK: the answer to the caller's buffer
+00E65E  1  A5 05 85 37  
+00E662  1  20 A5 ED             jsr farptr
+00E665  1  A0 00                ldy #0
+00E667  1  B9 00 C2     @s:     lda ASKBUF,y
+00E66A  1  8D 0B D2             sta PBDATA
+00E66D  1  F0 03                beq @sd
+00E66F  1  C8                   iny
+00E670  1  D0 F5                bne @s
+00E672  1  A9 00        @sd:    lda #0
+00E674  1  18                   clc
+00E675  1  60                   rts
+00E676  1               @cancel:
+00E676  1  A9 01                lda #1
+00E678  1  38                   sec
+00E679  1  60                   rts
+00E67A  1  4F 4B 7C 43  okcancel: .byte "OK|Cancel", 0
+00E67E  1  61 6E 63 65  
+00E682  1  6C 00        
+00E684  1               
+00E684  1               ; Copies the message (r0) and the buttons (r1) and measures them
+00E684  1               dlgtext:
+00E684  1  A5 02 85 36          MOVW T0, r0
+00E688  1  A5 03 85 37  
+00E68C  1  A9 00 85 34          LDW QP, STRBUF
+00E690  1  A9 C0 85 35  
+00E694  1  A9 FA                lda #250
+00E696  1  20 D8 ED             jsr fetchstr
+00E699  1  AD F8 ED             lda ASKING
+00E69C  1  D0 2F                bne @lines
+00E69E  1  A5 04                lda r1                  ; buttons
+00E6A0  1  05 05                ora r1+1
+00E6A2  1  D0 11                bne @b
+00E6A4  1  A9 4F                lda #'O'
+00E6A6  1  8D 00 C1             sta STRBUF2
+00E6A9  1  A9 4B                lda #'K'
+00E6AB  1  8D 01 C1             sta STRBUF2+1
+00E6AE  1  A9 00                lda #0
+00E6B0  1  8D 02 C1             sta STRBUF2+2
+00E6B3  1  F0 15                beq @s
+00E6B5  1  A5 04 85 36  @b:     MOVW T0, r1
+00E6B9  1  A5 05 85 37  
+00E6BD  1  A9 00 85 34          LDW QP, STRBUF2
+00E6C1  1  A9 C1 85 35  
+00E6C5  1  A9 3C                lda #60
+00E6C7  1  20 D8 ED             jsr fetchstr
+00E6CA  1  20 FD E6     @s:     jsr splitbtn
+00E6CD  1  A9 01        @lines: lda #1                  ; lines and the longest one
+00E6CF  1  8D FA ED             sta NLINES
+00E6D2  1  A9 00                lda #0
+00E6D4  1  8D FB ED             sta MAXLEN
+00E6D7  1  85 43                sta TMPB
+00E6D9  1  A0 00                ldy #0
+00E6DB  1  B9 00 C0     @l:     lda STRBUF,y
+00E6DE  1  F0 1C                beq @end
+00E6E0  1  C9 0D                cmp #13
+00E6E2  1  D0 09                bne @c
+00E6E4  1  EE FA ED             inc NLINES
+00E6E7  1  A9 00                lda #0
+00E6E9  1  85 43                sta TMPB
+00E6EB  1  F0 0C                beq @n
+00E6ED  1  E6 43        @c:     inc TMPB
+00E6EF  1  A5 43                lda TMPB
+00E6F1  1  CD FB ED             cmp MAXLEN
+00E6F4  1  90 03                bcc @n
+00E6F6  1  8D FB ED             sta MAXLEN
+00E6F9  1  C8           @n:     iny
+00E6FA  1  D0 DF                bne @l
+00E6FC  1  60           @end:   rts
+00E6FD  1               
+00E6FD  1               ; Buttons "A|B|C" in STRBUF2 -> NBTN, BOFS (start of each), BLEN
+00E6FD  1               splitbtn:
+00E6FD  1  A9 00                lda #0
+00E6FF  1  8D FC ED             sta NBTN
+00E702  1  A0 00                ldy #0
+00E704  1  AE FC ED     @b:     ldx NBTN
+00E707  1  98                   tya
+00E708  1  9D FD ED             sta BOFS,x
+00E70B  1  A9 00                lda #0
+00E70D  1  9D 00 EE             sta BLEN,x
+00E710  1  B9 00 C1     @c:     lda STRBUF2,y
+00E713  1  F0 1B                beq @last
+00E715  1  C9 7C                cmp #'|'
+00E717  1  F0 06                beq @next
+00E719  1  FE 00 EE             inc BLEN,x
+00E71C  1  C8                   iny
+00E71D  1  D0 F1                bne @c
+00E71F  1  A9 00        @next:  lda #0
+00E721  1  99 00 C1             sta STRBUF2,y
+00E724  1  C8                   iny
+00E725  1  EE FC ED             inc NBTN
+00E728  1  AD FC ED             lda NBTN
+00E72B  1  C9 03                cmp #3
+00E72D  1  D0 D5                bne @b
+00E72F  1  60                   rts
+00E730  1  EE FC ED     @last:  inc NBTN
+00E733  1  60                   rts
+00E734  1               
+00E734  1               ; Size, place, save under, draw: box, message, buttons
+00E734  1               dlgopen:
+00E734  1  A9 00                lda #0                  ; buttons' total width: sum((len+4)*8) + 16 per gap
+00E736  1  8D 0E EE             sta BTOT
+00E739  1  8D 0F EE             sta BTOT+1
+00E73C  1  A2 00                ldx #0
+00E73E  1  BD 00 EE     @w:     lda BLEN,x
+00E741  1  18                   clc
+00E742  1  69 04                adc #4
+00E744  1  0A                   asl
+00E745  1  0A                   asl
+00E746  1  0A                   asl
+00E747  1  9D 03 EE             sta BW,x
+00E74A  1  18                   clc
+00E74B  1  6D 0E EE             adc BTOT
+00E74E  1  8D 0E EE             sta BTOT
+00E751  1  90 03                bcc @w1
+00E753  1  EE 0F EE             inc BTOT+1
+00E756  1  E8           @w1:    inx
+00E757  1  EC FC ED             cpx NBTN
+00E75A  1  D0 E2                bne @w
+00E75C  1  CA                   dex
+00E75D  1  8A                   txa
+00E75E  1  0A                   asl
+00E75F  1  0A                   asl
+00E760  1  0A                   asl
+00E761  1  0A                   asl
+00E762  1  18                   clc
+00E763  1  6D 0E EE             adc BTOT
+00E766  1  8D 0E EE             sta BTOT
+00E769  1  90 03                bcc @w2
+00E76B  1  EE 0F EE             inc BTOT+1
+00E76E  1  AD FB ED     @w2:    lda MAXLEN              ; width = max(text * 8 + 48, buttons + 48, 240)
+00E771  1  AE F8 ED             ldx ASKING
+00E774  1  F0 0B                beq @a
+00E776  1  AD F9 ED             lda ASKMAX
+00E779  1  CD FB ED             cmp MAXLEN
+00E77C  1  B0 03                bcs @a
+00E77E  1  AD FB ED             lda MAXLEN
+00E781  1  85 36        @a:     sta T0
+00E783  1  A9 00                lda #0
+00E785  1  85 37                sta T0+1
+00E787  1  06 36                asl T0
+00E789  1  26 37                rol T0+1
+00E78B  1  06 36                asl T0
+00E78D  1  26 37                rol T0+1
+00E78F  1  06 36                asl T0
+00E791  1  26 37                rol T0+1
+00E793  1  A5 36 18 69          ADDW T0, T0, 48
+00E797  1  30 85 36 A5  
+00E79B  1  37 69 00 85  
+00E7A0  1  AD 0E EE 18          ADDW T1, BTOT, 48
+00E7A4  1  69 30 85 38  
+00E7A8  1  AD 0F EE 69  
+00E7AF  1  A5 38                lda T1                  ; T0 = max(T0, T1)
+00E7B1  1  C5 36                cmp T0
+00E7B3  1  A5 39                lda T1+1
+00E7B5  1  E5 37                sbc T0+1
+00E7B7  1  90 08                bcc @m1
+00E7B9  1  A5 38 85 36          MOVW T0, T1
+00E7BD  1  A5 39 85 37  
+00E7C1  1  A5 37        @m1:    lda T0+1
+00E7C3  1  D0 0E                bne @m2
+00E7C5  1  A5 36                lda T0
+00E7C7  1  C9 F0                cmp #240
+00E7C9  1  B0 08                bcs @m2
+00E7CB  1  A9 F0 85 36          LDW T0, 240
+00E7CF  1  A9 00 85 37  
+00E7D3  1  A5 36 8D 10  @m2:    MOVW DLGW, T0
+00E7D7  1  EE A5 37 8D  
+00E7DB  1  11 EE        
+00E7DD  1  AD FA ED             lda NLINES              ; height = lines * 16 + 76 (+ 28 for a field)
+00E7E0  1  0A                   asl
+00E7E1  1  0A                   asl
+00E7E2  1  0A                   asl
+00E7E3  1  0A                   asl
+00E7E4  1  18                   clc
+00E7E5  1  69 4C                adc #76
+00E7E7  1  AE F8 ED             ldx ASKING
+00E7EA  1  F0 02                beq @h
+00E7EC  1  69 1C                adc #28
+00E7EE  1  8D 12 EE     @h:     sta DLGH
+00E7F1  1  A9 80 85 38          LDW T1, 640             ; x0 = (640 - W) / 2
+00E7F5  1  A9 02 85 39  
+00E7F9  1  A5 38                lda T1
+00E7FB  1  38                   sec
+00E7FC  1  ED 10 EE             sbc DLGW
+00E7FF  1  85 38                sta T1
+00E801  1  A5 39                lda T1+1
+00E803  1  ED 11 EE             sbc DLGW+1
+00E806  1  4A                   lsr
+00E807  1  85 23                sta RX0+1
+00E809  1  A5 38                lda T1
+00E80B  1  6A                   ror
+00E80C  1  85 22                sta RX0
+00E80E  1  A5 22                lda RX0                 ; x1 = x0 + W - 1
+00E810  1  18                   clc
+00E811  1  6D 10 EE             adc DLGW
+00E814  1  85 26                sta RX1
+00E816  1  A5 23                lda RX0+1
+00E818  1  6D 11 EE             adc DLGW+1
+00E81B  1  85 27                sta RX1+1
+00E81D  1  A5 26 38 E9          SUBW RX1, RX1, 1
+00E821  1  01 85 26 A5  
+00E825  1  27 E9 00 85  
+00E82A  1  A9 8C                lda #<396               ; y0 = (396 - H) / 2
+00E82C  1  38                   sec
+00E82D  1  ED 12 EE             sbc DLGH
+00E830  1  85 38                sta T1
+00E832  1  A9 01                lda #>396
+00E834  1  E9 00                sbc #0
+00E836  1  4A                   lsr
+00E837  1  85 25                sta RY0+1
+00E839  1  A5 38                lda T1
+00E83B  1  6A                   ror
+00E83C  1  85 24                sta RY0
+00E83E  1  A5 24                lda RY0
+00E840  1  18                   clc
+00E841  1  6D 12 EE             adc DLGH
+00E844  1  85 28                sta RY1
+00E846  1  A5 25                lda RY0+1
+00E848  1  69 00                adc #0
+00E84A  1  85 29                sta RY1+1
+00E84C  1  A2 07                ldx #7
+00E84E  1  B5 22        @k:     lda RX0,x
+00E850  1  9D 13 EE             sta DLGR,x
+00E853  1  CA                   dex
+00E854  1  10 F8                bpl @k
+00E856  1  20 70 EC             jsr clipfull
+00E859  1  20 D3 E3             jsr shadowed            ; save what is under it (with the shadow)
+00E85C  1  20 F1 EC             jsr saveunder
+00E85F  1  20 59 E9             jsr dlgrect
+00E862  1  20 EE E3             jsr boxdraw             ; box, an inner frame
+00E865  1  20 59 E9             jsr dlgrect
+00E868  1  A5 22 18 69          ADDW RX0, RX0, 3
+00E86C  1  03 85 22 A5  
+00E870  1  23 69 00 85  
+00E875  1  A5 24 18 69          ADDW RY0, RY0, 3
+00E879  1  03 85 24 A5  
+00E87D  1  25 69 00 85  
+00E882  1  A5 26 38 E9          SUBW RX1, RX1, 3
+00E886  1  03 85 26 A5  
+00E88A  1  27 E9 00 85  
+00E88F  1  A5 28 38 E9          SUBW RY1, RY1, 3
+00E893  1  03 85 28 A5  
+00E897  1  29 E9 00 85  
+00E89C  1  20 27 EC             jsr framerect
+00E89F  1  20 59 E9             jsr dlgrect             ; the message, line by line
+00E8A2  1  A5 22 18 69          ADDW T0, RX0, 24
+00E8A6  1  18 85 36 A5  
+00E8AA  1  23 69 00 85  
+00E8AF  1  A5 24 18 69          ADDW T1, RY0, 20
+00E8B3  1  14 85 38 A5  
+00E8B7  1  25 69 00 85  
+00E8BC  1  20 93 EC             jsr moveto
+00E8BF  1  A9 00                lda #0
+00E8C1  1  8D 2B D3             sta STYLE
+00E8C4  1  A0 00                ldy #0
+00E8C6  1  B9 00 C0     @t:     lda STRBUF,y
+00E8C9  1  F0 1D                beq @bt
+00E8CB  1  C9 0D                cmp #13
+00E8CD  1  D0 13                bne @ch
+00E8CF  1  A5 38 18 69          ADDW T1, T1, 16
+00E8D3  1  10 85 38 A5  
+00E8D7  1  39 69 00 85  
+00E8DC  1  20 93 EC             jsr moveto
+00E8DF  1  4C E5 E8             jmp @nx
+00E8E2  1  8D 2C D3     @ch:    sta CHOUT
+00E8E5  1  C8           @nx:    iny
+00E8E6  1  D0 DE                bne @t
+00E8E8  1  AD 19 EE     @bt:    lda DLGR+6              ; buttons, right-aligned near the bottom
+00E8EB  1  38                   sec
+00E8EC  1  E9 24                sbc #36
+00E8EE  1  8D 0C EE             sta BY
+00E8F1  1  AD 1A EE             lda DLGR+7
+00E8F4  1  E9 00                sbc #0
+00E8F6  1  8D 0D EE             sta BY+1
+00E8F9  1  AD 17 EE             lda DLGR+4              ; first x = x1 - 24 - total
+00E8FC  1  38                   sec
+00E8FD  1  E9 18                sbc #24
+00E8FF  1  85 36                sta T0
+00E901  1  AD 18 EE             lda DLGR+5
+00E904  1  E9 00                sbc #0
+00E906  1  85 37                sta T0+1
+00E908  1  A5 36                lda T0
+00E90A  1  38                   sec
+00E90B  1  ED 0E EE             sbc BTOT
+00E90E  1  85 36                sta T0
+00E910  1  A5 37                lda T0+1
+00E912  1  ED 0F EE             sbc BTOT+1
+00E915  1  85 37                sta T0+1
+00E917  1  A2 00                ldx #0
+00E919  1  A5 36        @bb:    lda T0                  ; positions first
+00E91B  1  9D 06 EE             sta BXL,x
+00E91E  1  A5 37                lda T0+1
+00E920  1  9D 09 EE             sta BXH,x
+00E923  1  A5 36                lda T0                  ; next: + width + 16
+00E925  1  18                   clc
+00E926  1  7D 03 EE             adc BW,x
+00E929  1  85 36                sta T0
+00E92B  1  90 02                bcc @b1
+00E92D  1  E6 37                inc T0+1
+00E92F  1  A5 36 18 69  @b1:    ADDW T0, T0, 16
+00E933  1  10 85 36 A5  
+00E937  1  37 69 00 85  
+00E93C  1  E8                   inx
+00E93D  1  EC FC ED             cpx NBTN
+00E940  1  D0 D7                bne @bb
+00E942  1  A9 00                lda #0                  ; then the buttons
+00E944  1  8D 1C EE             sta BI
+00E947  1  AE 1C EE     @bd:    ldx BI
+00E94A  1  20 A3 E9             jsr drawbtn
+00E94D  1  EE 1C EE             inc BI
+00E950  1  AD 1C EE             lda BI
+00E953  1  CD FC ED             cmp NBTN
+00E956  1  D0 EF                bne @bd
+00E958  1  60                   rts
+00E959  1               
+00E959  1               ; RX0..RY1 = the dialog box
+00E959  1               dlgrect:
+00E959  1  A2 07                ldx #7
+00E95B  1  BD 13 EE     @c:     lda DLGR,x
+00E95E  1  95 22                sta RX0,x
+00E960  1  CA                   dex
+00E961  1  10 F8                bpl @c
+00E963  1  60                   rts
+00E964  1               
+00E964  1               ; RX0..RY1 = button X
+00E964  1               btnrect:
+00E964  1  BD 06 EE             lda BXL,x
+00E967  1  85 22                sta RX0
+00E969  1  BD 09 EE             lda BXH,x
+00E96C  1  85 23                sta RX0+1
+00E96E  1  BD 03 EE             lda BW,x
+00E971  1  18                   clc
+00E972  1  65 22                adc RX0
+00E974  1  85 26                sta RX1
+00E976  1  A5 23                lda RX0+1
+00E978  1  69 00                adc #0
+00E97A  1  85 27                sta RX1+1
+00E97C  1  A5 26 38 E9          SUBW RX1, RX1, 1
+00E980  1  01 85 26 A5  
+00E984  1  27 E9 00 85  
+00E989  1  AD 0C EE 85          MOVW RY0, BY
+00E98D  1  24 AD 0D EE  
+00E991  1  85 25        
+00E993  1  AD 0C EE 18          ADDW RY1, BY, 21
+00E997  1  69 15 85 28  
+00E99B  1  AD 0D EE 69  
+00E9A2  1  60                   rts
+00E9A3  1               
+00E9A3  1               ; Button X: frame, label centred; the first one has a thick frame
+00E9A3  1               drawbtn:
+00E9A3  1  86 3A                stx T2
+00E9A5  1  20 64 E9             jsr btnrect
+00E9A8  1  A9 00                lda #0
+00E9AA  1  20 11 EC             jsr fillrect
+00E9AD  1  20 27 EC             jsr framerect
+00E9B0  1  A6 3A                ldx T2
+00E9B2  1  D0 6E                bne @lab
+00E9B4  1  A5 22 38 E9          SUBW RX0, RX0, 3        ; the default button
+00E9B8  1  03 85 22 A5  
+00E9BC  1  23 E9 00 85  
+00E9C1  1  A5 24 38 E9          SUBW RY0, RY0, 3
+00E9C5  1  03 85 24 A5  
+00E9C9  1  25 E9 00 85  
+00E9CE  1  A5 26 18 69          ADDW RX1, RX1, 3
+00E9D2  1  03 85 26 A5  
+00E9D6  1  27 69 00 85  
+00E9DB  1  A5 28 18 69          ADDW RY1, RY1, 3
+00E9DF  1  03 85 28 A5  
+00E9E3  1  29 69 00 85  
+00E9E8  1  20 27 EC             jsr framerect
+00E9EB  1  A5 22 18 69          ADDW RX0, RX0, 1
+00E9EF  1  01 85 22 A5  
+00E9F3  1  23 69 00 85  
+00E9F8  1  A5 24 18 69          ADDW RY0, RY0, 1
+00E9FC  1  01 85 24 A5  
+00EA00  1  25 69 00 85  
+00EA05  1  A5 26 38 E9          SUBW RX1, RX1, 1
+00EA09  1  01 85 26 A5  
+00EA0D  1  27 E9 00 85  
+00EA12  1  A5 28 38 E9          SUBW RY1, RY1, 1
+00EA16  1  01 85 28 A5  
+00EA1A  1  29 E9 00 85  
+00EA1F  1  20 27 EC             jsr framerect
+00EA22  1  A6 3A        @lab:   ldx T2
+00EA24  1  20 64 E9             jsr btnrect
+00EA27  1  A6 3A                ldx T2
+00EA29  1  BD 00 EE             lda BLEN,x
+00EA2C  1  20 77 ED             jsr centrex
+00EA2F  1  A5 24 18 69          ADDW T1, RY0, 3
+00EA33  1  03 85 38 A5  
+00EA37  1  25 69 00 85  
+00EA3C  1  20 93 EC             jsr moveto
+00EA3F  1  A6 3A                ldx T2
+00EA41  1  BD FD ED             lda BOFS,x
+00EA44  1  18                   clc
+00EA45  1  69 00                adc #<STRBUF2
+00EA47  1  85 32                sta TP
+00EA49  1  A9 C1                lda #>STRBUF2
+00EA4B  1  69 00                adc #0
+00EA4D  1  85 33                sta TP+1
+00EA4F  1  A9 00                lda #0
+00EA51  1  8D 2B D3             sta STYLE
+00EA54  1  4C A8 EC             jmp drawstr
+00EA57  1               
+00EA57  1               ; The text field of ASK: its box, the text and a cursor
+00EA57  1               drawfield:
+00EA57  1  20 98 EA             jsr fieldrect
+00EA5A  1  A9 00                lda #0
+00EA5C  1  20 11 EC             jsr fillrect
+00EA5F  1  20 27 EC             jsr framerect
+00EA62  1  20 98 EA             jsr fieldrect
+00EA65  1  A5 22 18 69          ADDW T0, RX0, 4
+00EA69  1  04 85 36 A5  
+00EA6D  1  23 69 00 85  
+00EA72  1  A5 24 18 69          ADDW T1, RY0, 3
+00EA76  1  03 85 38 A5  
+00EA7A  1  25 69 00 85  
+00EA7F  1  20 93 EC             jsr moveto
+00EA82  1  A9 00                lda #0
+00EA84  1  8D 2B D3             sta STYLE
+00EA87  1  A9 00 85 32          LDW TP, ASKBUF
+00EA8B  1  A9 C2 85 33  
+00EA8F  1  20 A8 EC             jsr drawstr
+00EA92  1  A9 5F                lda #'_'
+00EA94  1  8D 2C D3             sta CHOUT
+00EA97  1  60                   rts
+00EA98  1               
+00EA98  1               fieldrect:
+00EA98  1  20 59 E9             jsr dlgrect
+00EA9B  1  A5 22 18 69          ADDW RX0, RX0, 20
+00EA9F  1  14 85 22 A5  
+00EAA3  1  23 69 00 85  
+00EAA8  1  A5 26 38 E9          SUBW RX1, RX1, 20
+00EAAC  1  14 85 26 A5  
+00EAB0  1  27 E9 00 85  
+00EAB5  1  AD FA ED             lda NLINES
+00EAB8  1  0A                   asl
+00EAB9  1  0A                   asl
+00EABA  1  0A                   asl
+00EABB  1  0A                   asl
+00EABC  1  18                   clc
+00EABD  1  69 18                adc #24
+00EABF  1  65 24                adc RY0
+00EAC1  1  85 24                sta RY0
+00EAC3  1  A5 25                lda RY0+1
+00EAC5  1  69 00                adc #0
+00EAC7  1  85 25                sta RY0+1
+00EAC9  1  A5 24 18 69          ADDW RY1, RY0, 21
+00EACD  1  15 85 28 A5  
+00EAD1  1  25 69 00 85  
+00EAD6  1  60                   rts
+00EAD7  1               
+00EAD7  1               ; Waits for a button: Enter = the first, Esc = the last, or a click on one
+00EAD7  1               ; (inverted while the button is held over it). Then closes the dialog.
+00EAD7  1               ; ASK: typing edits ASKBUF. -> A = button.
+00EAD7  1               dlgloop:
+00EAD7  1  AD 06 D5             lda CLICKS
+00EADA  1  20 6E ED     @loop:  jsr waitframe
+00EADD  1  AD 11 D0             lda KBDCR
+00EAE0  1  10 61                bpl @mouse
+00EAE2  1  AD 10 D0             lda KBD
+00EAE5  1  29 7F                and #$7F
+00EAE7  1  C9 0D                cmp #13
+00EAE9  1  D0 05                bne @esc
+00EAEB  1  A9 00                lda #0
+00EAED  1  4C 9C EB             jmp @done
+00EAF0  1  C9 1B        @esc:   cmp #27
+00EAF2  1  D0 08                bne @type
+00EAF4  1  AE FC ED             ldx NBTN
+00EAF7  1  CA                   dex
+00EAF8  1  8A                   txa
+00EAF9  1  4C 9C EB             jmp @done
+00EAFC  1  AE F8 ED     @type:  ldx ASKING
+00EAFF  1  F0 D9                beq @loop
+00EB01  1  C9 08                cmp #8                  ; Backspace (and Delete) erase
+00EB03  1  F0 25                beq @bs
+00EB05  1  C9 7F                cmp #127
+00EB07  1  F0 21                beq @bs
+00EB09  1  C9 20                cmp #' '
+00EB0B  1  90 CD                bcc @loop
+00EB0D  1  A0 00                ldy #0
+00EB0F  1  BE 00 C2     @len:   ldx ASKBUF,y
+00EB12  1  F0 03                beq @add
+00EB14  1  C8                   iny
+00EB15  1  D0 F8                bne @len
+00EB17  1  CC F9 ED     @add:   cpy ASKMAX
+00EB1A  1  B0 BE                bcs @loop
+00EB1C  1  99 00 C2             sta ASKBUF,y
+00EB1F  1  A9 00                lda #0
+00EB21  1  99 01 C2             sta ASKBUF+1,y
+00EB24  1  20 57 EA             jsr drawfield
+00EB27  1  4C DA EA             jmp @loop
+00EB2A  1  A0 00        @bs:    ldy #0
+00EB2C  1  B9 00 C2     @l2:    lda ASKBUF,y
+00EB2F  1  F0 03                beq @del
+00EB31  1  C8                   iny
+00EB32  1  D0 F8                bne @l2
+00EB34  1  C0 00        @del:   cpy #0
+00EB36  1  F0 A2                beq @loop
+00EB38  1  A9 00                lda #0
+00EB3A  1  99 FF C1             sta ASKBUF-1,y
+00EB3D  1  20 57 EA             jsr drawfield
+00EB40  1  4C DA EA             jmp @loop
+00EB43  1  AD 06 D5     @mouse: lda CLICKS
+00EB46  1  29 01                and #1
+00EB48  1  F0 90                beq @loop
+00EB4A  1  20 32 ED             jsr readmouse
+00EB4D  1  A2 00                ldx #0
+00EB4F  1  86 43        @hit:   stx TMPB
+00EB51  1  20 64 E9             jsr btnrect
+00EB54  1  20 47 ED             jsr inrect
+00EB57  1  B0 0B                bcs @press
+00EB59  1  A6 43                ldx TMPB
+00EB5B  1  E8                   inx
+00EB5C  1  EC FC ED             cpx NBTN
+00EB5F  1  D0 EE                bne @hit
+00EB61  1  4C DA EA             jmp @loop
+00EB64  1  A9 01        @press: lda #1                  ; held: inverted while over it
+00EB66  1  8D 1B EE             sta INV
+00EB69  1  20 AC EB             jsr invbtn
+00EB6C  1  20 6E ED     @hold:  jsr waitframe
+00EB6F  1  20 32 ED             jsr readmouse
+00EB72  1  A6 43                ldx TMPB
+00EB74  1  20 64 E9             jsr btnrect
+00EB77  1  20 47 ED             jsr inrect
+00EB7A  1  A9 00                lda #0
+00EB7C  1  2A                   rol                     ; 1 if over it
+00EB7D  1  CD 1B EE             cmp INV
+00EB80  1  F0 06                beq @same
+00EB82  1  8D 1B EE             sta INV
+00EB85  1  20 AC EB             jsr invbtn
+00EB88  1  AD 04 D5     @same:  lda BUTTONS
+00EB8B  1  29 01                and #1
+00EB8D  1  D0 DD                bne @hold
+00EB8F  1  AD 1B EE             lda INV
+00EB92  1  D0 03                bne @chose
+00EB94  1  4C DA EA             jmp @loop               ; released outside: nothing
+00EB97  1               @chose:
+00EB97  1  20 AC EB             jsr invbtn
+00EB9A  1  A5 43                lda TMPB
+00EB9C  1  48           @done:  pha
+00EB9D  1  20 59 E9             jsr dlgrect             ; what was under the dialog back
+00EBA0  1  20 D3 E3             jsr shadowed
+00EBA3  1  20 FE EC             jsr restunder
+00EBA6  1  AD 06 D5             lda CLICKS
+00EBA9  1  68                   pla
+00EBAA  1  18                   clc
+00EBAB  1  60                   rts
+00EBAC  1               
+00EBAC  1  A6 43        invbtn: ldx TMPB
+00EBAE  1  20 64 E9             jsr btnrect
+00EBB1  1  A5 22 18 69          ADDW RX0, RX0, 1
+00EBB5  1  01 85 22 A5  
+00EBB9  1  23 69 00 85  
+00EBBE  1  A5 24 18 69          ADDW RY0, RY0, 1
+00EBC2  1  01 85 24 A5  
+00EBC6  1  25 69 00 85  
+00EBCB  1  A5 26 38 E9          SUBW RX1, RX1, 1
+00EBCF  1  01 85 26 A5  
+00EBD3  1  27 E9 00 85  
+00EBD8  1  A5 28 38 E9          SUBW RY1, RY1, 1
+00EBDC  1  01 85 28 A5  
+00EBE0  1  29 E9 00 85  
+00EBE5  1  4C 52 EC             jmp invrect
+00EBE8  1               
+00EBE8  1                       .include "common.inc"
+00EBE8  2               ;=============================================================================
+00EBE8  2               ; common.inc - drawing helpers assembled into both toolkit banks
+00EBE8  2               ;=============================================================================
+00EBE8  2               
+00EBE8  2               ; Blitter X0,Y0-X1,Y1 = RX0,RY0-RX1,RY1
+00EBE8  2               setrect:
+00EBE8  2  A5 22                lda RX0
+00EBEA  2  8D 10 D3             sta BX0
+00EBED  2  A5 23                lda RX0+1
+00EBEF  2  8D 1A D3             sta BX0H
+00EBF2  2  A5 24                lda RY0
+00EBF4  2  8D 11 D3             sta BY0
+00EBF7  2  A5 25                lda RY0+1
+00EBF9  2  8D 1B D3             sta BY0H
+00EBFC  2  A5 26                lda RX1
+00EBFE  2  8D 12 D3             sta BX1
+00EC01  2  A5 27                lda RX1+1
+00EC03  2  8D 1C D3             sta BX1H
+00EC06  2  A5 28                lda RY1
+00EC08  2  8D 13 D3             sta BY1
+00EC0B  2  A5 29                lda RY1+1
+00EC0D  2  8D 1D D3             sta BY1H
+00EC10  2  60                   rts
+00EC11  2               
+00EC11  2               ; Filled box over RX0..RY1 with colour A (0 paper, 1 ink), plain SET
+00EC11  2               fillrect:
+00EC11  2  A2 00                ldx #R_SET
+00EC13  2  8E 28 D3             stx ROP
+00EC16  2  A2 00                ldx #0
+00EC18  2  8E 29 D3             stx PATON
+00EC1B  2  8D 14 D3     fillr2: sta BCOL
+00EC1E  2  20 E8 EB             jsr setrect
+00EC21  2  A9 05                lda #C_BOXF
+00EC23  2  8D 18 D3             sta BCMD
+00EC26  2  60                   rts
+00EC27  2               
+00EC27  2               ; Frame (BOX) around RX0..RY1 in ink
+00EC27  2               framerect:
+00EC27  2  A9 00                lda #R_SET
+00EC29  2  8D 28 D3             sta ROP
+00EC2C  2  A9 00                lda #0
+00EC2E  2  8D 29 D3             sta PATON
+00EC31  2  A9 01                lda #1
+00EC33  2  8D 14 D3             sta BCOL
+00EC36  2  20 E8 EB             jsr setrect
+00EC39  2  A9 04                lda #C_BOX
+00EC3B  2  8D 18 D3             sta BCMD
+00EC3E  2  60                   rts
+00EC3F  2               
+00EC3F  2               ; RX0..RY1 filled with the current PATTERN
+00EC3F  2               patrect:
+00EC3F  2  A9 00                lda #R_SET
+00EC41  2  8D 28 D3             sta ROP
+00EC44  2  A9 01                lda #1
+00EC46  2  8D 29 D3             sta PATON
+00EC49  2  20 1B EC             jsr fillr2
+00EC4C  2  A9 00                lda #0
+00EC4E  2  8D 29 D3             sta PATON
+00EC51  2  60                   rts
+00EC52  2               
+00EC52  2               ; RX0..RY1 inverted
+00EC52  2               invrect:
+00EC52  2  A9 04                lda #R_INV
+00EC54  2  8D 28 D3             sta ROP
+00EC57  2  A9 00                lda #0
+00EC59  2  8D 29 D3             sta PATON
+00EC5C  2  20 1B EC             jsr fillr2
+00EC5F  2  A9 00                lda #R_SET
+00EC61  2  8D 28 D3             sta ROP
+00EC64  2  60                   rts
+00EC65  2               
+00EC65  2               ; Clip rectangle = RX0..RY1
+00EC65  2               clipset:
+00EC65  2  A2 07                ldx #7
+00EC67  2  B5 22        @c:     lda RX0,x
+00EC69  2  9D 38 D3             sta CLIPR,x
+00EC6C  2  CA                   dex
+00EC6D  2  10 F8                bpl @c
+00EC6F  2  60                   rts
+00EC70  2               
+00EC70  2               ; Clip rectangle = the whole screen
+00EC70  2               clipfull:
+00EC70  2  A9 00                lda #0
+00EC72  2  8D 38 D3             sta CLIPR
+00EC75  2  8D 39 D3             sta CLIPR+1
+00EC78  2  8D 3A D3             sta CLIPR+2
+00EC7B  2  8D 3B D3             sta CLIPR+3
+00EC7E  2  A9 7F                lda #<639
+00EC80  2  8D 3C D3             sta CLIPR+4
+00EC83  2  A9 02                lda #>639
+00EC85  2  8D 3D D3             sta CLIPR+5
+00EC88  2  A9 8F                lda #<399
+00EC8A  2  8D 3E D3             sta CLIPR+6
+00EC8D  2  A9 01                lda #>399
+00EC8F  2  8D 3F D3             sta CLIPR+7
+00EC92  2  60                   rts
+00EC93  2               
+00EC93  2               ; Text position X0 = T0, Y0 = T1
+00EC93  2               moveto:
+00EC93  2  A5 36                lda T0
+00EC95  2  8D 10 D3             sta BX0
+00EC98  2  A5 37                lda T0+1
+00EC9A  2  8D 1A D3             sta BX0H
+00EC9D  2  A5 38                lda T1
+00EC9F  2  8D 11 D3             sta BY0
+00ECA2  2  A5 39                lda T1+1
+00ECA4  2  8D 1B D3             sta BY0H
+00ECA7  2  60                   rts
+00ECA8  2               
+00ECA8  2               ; Draws the 0-terminated string at TP (fixed RAM) at X0,Y0 in STYLE
+00ECA8  2               drawstr:
+00ECA8  2  A0 00                ldy #0
+00ECAA  2  B1 32        @l:     lda (TP),y
+00ECAC  2  F0 06                beq @e
+00ECAE  2  8D 2C D3             sta CHOUT
+00ECB1  2  C8                   iny
+00ECB2  2  D0 F6                bne @l
+00ECB4  2  60           @e:     rts
+00ECB5  2               
+00ECB5  2               ; A = length of the string at TP (up to 255)
+00ECB5  2               strlen:
+00ECB5  2  A0 00                ldy #0
+00ECB7  2  B1 32        @l:     lda (TP),y
+00ECB9  2  F0 03                beq @e
+00ECBB  2  C8                   iny
+00ECBC  2  D0 F9                bne @l
+00ECBE  2  98           @e:     tya
+00ECBF  2  60                   rts
+00ECC0  2               
+00ECC0  2               ; PATTERN = 8 bytes at QP
+00ECC0  2               setpat:
+00ECC0  2  A0 07                ldy #7
+00ECC2  2  B1 34        @p:     lda (QP),y
+00ECC4  2  99 30 D3             sta PATTERN,y
+00ECC7  2  88                   dey
+00ECC8  2  10 F8                bpl @p
+00ECCA  2  60                   rts
+00ECCB  2               patgrey:
+00ECCB  2  A9 E1                lda #<pgrey
+00ECCD  2  85 34                sta QP
+00ECCF  2  A9 EC                lda #>pgrey
+00ECD1  2  85 35                sta QP+1
+00ECD3  2  4C C0 EC             jmp setpat
+00ECD6  2               patstripe:
+00ECD6  2  A9 E9                lda #<pstripe
+00ECD8  2  85 34                sta QP
+00ECDA  2  A9 EC                lda #>pstripe
+00ECDC  2  85 35                sta QP+1
+00ECDE  2  4C C0 EC             jmp setpat
+00ECE1  2  AA 55 AA 55  pgrey:   .byte $AA, $55, $AA, $55, $AA, $55, $AA, $55
+00ECE5  2  AA 55 AA 55  
+00ECE9  2  00 FF 00 FF  pstripe: .byte $00, $FF, $00, $FF, $00, $FF, $00, $FF
+00ECED  2  00 FF 00 FF  
+00ECF1  2               
+00ECF1  2               ; COPY RX0..RY1 from page 0 to the same place on page 1 (save what is under)
+00ECF1  2               saveunder:
+00ECF1  2  A9 01                lda #1
+00ECF3  2  8D 02 D3             sta DRAW
+00ECF6  2  A9 00                lda #0
+00ECF8  2  8D 17 D3             sta BSRC
+00ECFB  2  4C 08 ED             jmp copysame
+00ECFE  2               ; ... and back from page 1 to page 0
+00ECFE  2               restunder:
+00ECFE  2  A9 00                lda #0
+00ED00  2  8D 02 D3             sta DRAW
+00ED03  2  A9 01                lda #1
+00ED05  2  8D 17 D3             sta BSRC
+00ED08  2               copysame:
+00ED08  2  A9 00                lda #R_SET
+00ED0A  2  8D 28 D3             sta ROP
+00ED0D  2  20 E8 EB             jsr setrect
+00ED10  2  A5 22                lda RX0
+00ED12  2  8D 15 D3             sta BDX
+00ED15  2  A5 23                lda RX0+1
+00ED17  2  8D 1E D3             sta BDXH
+00ED1A  2  A5 24                lda RY0
+00ED1C  2  8D 16 D3             sta BDY
+00ED1F  2  A5 25                lda RY0+1
+00ED21  2  8D 1F D3             sta BDYH
+00ED24  2  20 70 EC             jsr clipfull
+00ED27  2  A9 06                lda #C_COPY
+00ED29  2  8D 18 D3             sta BCMD
+00ED2C  2  A9 00                lda #0
+00ED2E  2  8D 02 D3             sta DRAW
+00ED31  2  60                   rts
+00ED32  2               
+00ED32  2               ; MX, MY = the mouse
+00ED32  2               readmouse:
+00ED32  2  AD 00 D5             lda MOUSEX
+00ED35  2  85 46                sta MX
+00ED37  2  AD 01 D5             lda MOUSEX+1
+00ED3A  2  85 47                sta MX+1
+00ED3C  2  AD 02 D5             lda MOUSEY
+00ED3F  2  85 48                sta MY
+00ED41  2  AD 03 D5             lda MOUSEY+1
+00ED44  2  85 49                sta MY+1
+00ED46  2  60                   rts
+00ED47  2               
+00ED47  2               ; Carry set if MX,MY is inside RX0..RY1
+00ED47  2               inrect:
+00ED47  2  A5 46                lda MX                  ; MX >= RX0
+00ED49  2  C5 22                cmp RX0
+00ED4B  2  A5 47                lda MX+1
+00ED4D  2  E5 23                sbc RX0+1
+00ED4F  2  90 1C                bcc @no
+00ED51  2  A5 26                lda RX1                 ; RX1 >= MX
+00ED53  2  C5 46                cmp MX
+00ED55  2  A5 27                lda RX1+1
+00ED57  2  E5 47                sbc MX+1
+00ED59  2  90 12                bcc @no
+00ED5B  2  A5 48                lda MY
+00ED5D  2  C5 24                cmp RY0
+00ED5F  2  A5 49                lda MY+1
+00ED61  2  E5 25                sbc RY0+1
+00ED63  2  90 08                bcc @no
+00ED65  2  A5 28                lda RY1
+00ED67  2  C5 48                cmp MY
+00ED69  2  A5 29                lda RY1+1
+00ED6B  2  E5 49                sbc MY+1
+00ED6D  2  60           @no:    rts                     ; carry = the last comparison
+00ED6E  2               
+00ED6E  2               ; Waits for the next frame
+00ED6E  2               waitframe:
+00ED6E  2  AD 01 D0             lda FRAME
+00ED71  2  CD 01 D0     @w:     cmp FRAME
+00ED74  2  F0 FB                beq @w
+00ED76  2  60                   rts
+00ED77  2               
+00ED77  2               ; T0 = X position that centres A characters between RX0 and RX1:
+00ED77  2               ; (RX0 + RX1) / 2 - A * 4
+00ED77  2               centrex:
+00ED77  2  85 43                sta TMPB
+00ED79  2  A5 22                lda RX0
+00ED7B  2  18                   clc
+00ED7C  2  65 26                adc RX1
+00ED7E  2  85 36                sta T0
+00ED80  2  A5 23                lda RX0+1
+00ED82  2  65 27                adc RX1+1
+00ED84  2  4A                   lsr
+00ED85  2  85 37                sta T0+1
+00ED87  2  66 36                ror T0
+00ED89  2  A9 00                lda #0
+00ED8B  2  85 44                sta TMPC
+00ED8D  2  A5 43                lda TMPB                ; A * 4 -> TMPC:TMPB
+00ED8F  2  0A                   asl
+00ED90  2  26 44                rol TMPC
+00ED92  2  0A                   asl
+00ED93  2  26 44                rol TMPC
+00ED95  2  85 43                sta TMPB
+00ED97  2  A5 36                lda T0
+00ED99  2  38                   sec
+00ED9A  2  E5 43                sbc TMPB
+00ED9C  2  85 36                sta T0
+00ED9E  2  A5 37                lda T0+1
+00EDA0  2  E5 44                sbc TMPC
+00EDA2  2  85 37                sta T0+1
+00EDA4  2  60                   rts
+00EDA5  2               
+00EDA5  2               ; Port B = the caller's address T0: $E000-$EFFF is in the caller's bank
+00EDA5  2               ; (CBANK), anything else in the fixed RAM
+00EDA5  2               farptr:
+00EDA5  2  A5 36                lda T0
+00EDA7  2  8D 08 D2             sta PBADR
+00EDAA  2  A5 37                lda T0+1
+00EDAC  2  29 F0                and #$F0
+00EDAE  2  C9 E0                cmp #$E0
+00EDB0  2  D0 1B                bne @fixed
+00EDB2  2  A5 37                lda T0+1
+00EDB4  2  29 0F                and #$0F
+00EDB6  2  85 3C                sta T3
+00EDB8  2  A5 40                lda CBANK
+00EDBA  2  0A                   asl
+00EDBB  2  0A                   asl
+00EDBC  2  0A                   asl
+00EDBD  2  0A                   asl
+00EDBE  2  05 3C                ora T3
+00EDC0  2  8D 09 D2             sta PBADR+1
+00EDC3  2  A5 40                lda CBANK
+00EDC5  2  4A                   lsr
+00EDC6  2  4A                   lsr
+00EDC7  2  4A                   lsr
+00EDC8  2  4A                   lsr
+00EDC9  2  8D 0A D2             sta PBADR+2
+00EDCC  2  60                   rts
+00EDCD  2  A5 37        @fixed: lda T0+1
+00EDCF  2  8D 09 D2             sta PBADR+1
+00EDD2  2  A9 FF                lda #$FF
+00EDD4  2  8D 0A D2             sta PBADR+2
+00EDD7  2  60                   rts
+00EDD8  2               
+00EDD8  2               ; Copies the caller's string at T0 to QP (fixed RAM), at most A characters,
+00EDD8  2               ; always ending with 0
+00EDD8  2               fetchstr:
+00EDD8  2  85 3D                sta T3+1
+00EDDA  2  20 A5 ED             jsr farptr
+00EDDD  2  A0 00                ldy #0
+00EDDF  2  C4 3D        @l:     cpy T3+1
+00EDE1  2  F0 0A                beq @end
+00EDE3  2  AD 0B D2             lda PBDATA
+00EDE6  2  91 34                sta (QP),y
+00EDE8  2  F0 07                beq @done
+00EDEA  2  C8                   iny
+00EDEB  2  D0 F2                bne @l
+00EDED  2  A9 00        @end:   lda #0
+00EDEF  2  91 34                sta (QP),y
+00EDF1  2  60           @done:  rts
+00EDF2  2               
+00EDF2  1               
+00EDF2  1               ; --- this bank's variables ----------------------------------------------------------
+00EDF2  1  xx           NITEM:  .res 1
+00EDF3  1  xx           TLEN:   .res 1
+00EDF4  1  xx           CURM:   .res 1
+00EDF5  1  xx           CURI:   .res 1
+00EDF6  1  xx           SELM:   .res 1
+00EDF7  1  xx           SELI:   .res 1
+00EDF8  1  xx           ASKING: .res 1
+00EDF9  1  xx           ASKMAX: .res 1
+00EDFA  1  xx           NLINES: .res 1
+00EDFB  1  xx           MAXLEN: .res 1
+00EDFC  1  xx           NBTN:   .res 1
+00EDFD  1  xx xx xx     BOFS:   .res 3
+00EE00  1  xx xx xx     BLEN:   .res 3
+00EE03  1  xx xx xx     BW:     .res 3
+00EE06  1  xx xx xx     BXL:    .res 3
+00EE09  1  xx xx xx     BXH:    .res 3
+00EE0C  1  xx xx        BY:     .res 2
+00EE0E  1  xx xx        BTOT:   .res 2
+00EE10  1  xx xx        DLGW:   .res 2
+00EE12  1  xx           DLGH:   .res 1
+00EE13  1  xx xx xx xx  DLGR:   .res 8
+00EE17  1  xx xx xx xx  
+00EE1B  1  xx           INV:    .res 1
+00EE1C  1  xx           BI:     .res 1
+00EE1C  1               

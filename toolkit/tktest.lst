@@ -1,0 +1,774 @@
+ca65 V2.19 - Git 52727a5
+Main file   : tktest.asm
+Current file: tktest.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; tktest.asm - test program for the mini6502 desktop toolkit (bank $20)
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain. Menus, windows that can be dragged, brought to the front and
+000000r 1               ; closed (with a confirmation), a dialog that asks for a name, keyboard
+000000r 1               ; shortcuts. Each window remembers where it was clicked (small squares) and
+000000r 1               ; the last key typed into it, and draws them again on UPDATE.
+000000r 1               ;
+000000r 1               ;   L TK1 E000 10  /  L TK2 E000 11  /  V 10 10 E000   (the toolkit)
+000000r 1               ;   L TKTEST E000 20  /  D020: 20  /  E000R             (this program)
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1                       .include "tk.inc"
+000000r 2               ;=============================================================================
+000000r 2               ; tk.inc - mini6502 desktop toolkit: shared definitions (both toolkit banks)
+000000r 2               ;-----------------------------------------------------------------------------
+000000r 2               ; Public domain. See README.txt for the programming interface.
+000000r 2               ;=============================================================================
+000000r 2               
+000000r 2               TKBANK1 = $10           ; dispatcher, windows, events
+000000r 2               TKBANK2 = $11           ; menus, dialogs
+000000r 2               SWAPBANK = $D0          ; the caller's RAM ($0000-$CBFF) while the desktop runs
+000000r 2               
+000000r 2               ; --- function numbers (A when calling TOOL = $CC88) --------------------------
+000000r 2               TK_INIT     = 0
+000000r 2               TK_EXIT     = 1
+000000r 2               TK_MENUBAR  = 2
+000000r 2               TK_MENUITEM = 3
+000000r 2               TK_OPENWIN  = 4
+000000r 2               TK_CLOSEWIN = 5
+000000r 2               TK_GETEVENT = 6
+000000r 2               TK_POLLEVENT = 7
+000000r 2               TK_SETPORT  = 8
+000000r 2               TK_ALERT    = 9
+000000r 2               TK_ASK      = 10
+000000r 2               TK_TEXT     = 11
+000000r 2               TK_INVAL    = 12
+000000r 2               TK_FRONT    = 13
+000000r 2               TK_CLEAR    = 14
+000000r 2               TK_SETTITLE = 15
+000000r 2               TK_LAST     = 15
+000000r 2               
+000000r 2               ; --- events (A after GETEVENT / POLLEVENT) ---------------------------------------
+000000r 2               EV_NONE   = 0
+000000r 2               EV_KEY    = 1           ; X = character (0: Y = KBDEXT code)
+000000r 2               EV_MENU   = 2           ; X = menu, Y = item
+000000r 2               EV_CLICK  = 3           ; X = window ($FF desktop), Y = buttons (+$80 double), r0/r1 = x/y
+000000r 2               EV_UPDATE = 4           ; X = window: draw its contents (clip already set)
+000000r 2               EV_CLOSE  = 5           ; X = window: its close box was clicked
+000000r 2               EV_WHEEL  = 6           ; X = front window ($FF none), Y = steps (signed)
+000000r 2               
+000000r 2               ; --- hardware ------------------------------------------------------------------------
+000000r 2               FRAME   = $D001
+000000r 2               KBD     = $D010
+000000r 2               KBDCR   = $D011
+000000r 2               KBDEXT  = $D019
+000000r 2               BANK    = $D020
+000000r 2               DMASRC  = $D210         ; DMA: source, destination, length
+000000r 2               DMACMD  = $D219
+000000r 2               PBADR   = $D208         ; port B (the toolkit's): address, data, step
+000000r 2               PBDATA  = $D20B
+000000r 2               PBSTEP  = $D20C
+000000r 2               MODE    = $D300
+000000r 2               SHOW    = $D301
+000000r 2               DRAW    = $D302
+000000r 2               BX0     = $D310
+000000r 2               BY0     = $D311
+000000r 2               BX1     = $D312
+000000r 2               BY1     = $D313
+000000r 2               BCOL    = $D314
+000000r 2               BDX     = $D315
+000000r 2               BDY     = $D316
+000000r 2               BSRC    = $D317
+000000r 2               BCMD    = $D318
+000000r 2               BX0H    = $D31A
+000000r 2               BY0H    = $D31B
+000000r 2               BX1H    = $D31C
+000000r 2               BY1H    = $D31D
+000000r 2               BDXH    = $D31E
+000000r 2               BDYH    = $D31F
+000000r 2               ROP     = $D328
+000000r 2               PATON   = $D329
+000000r 2               STYLE   = $D32B
+000000r 2               CHOUT   = $D32C
+000000r 2               PATTERN = $D330
+000000r 2               CLIPR   = $D338
+000000r 2               MOUSEX  = $D500
+000000r 2               MOUSEY  = $D502
+000000r 2               BUTTONS = $D504
+000000r 2               WHEEL   = $D505
+000000r 2               CLICKS  = $D506
+000000r 2               PTR     = $D508
+000000r 2               
+000000r 2               C_CLEAR = 1
+000000r 2               C_LINE  = 3
+000000r 2               C_BOX   = 4
+000000r 2               C_BOXF  = 5
+000000r 2               C_COPY  = 6
+000000r 2               C_STAMP = 10
+000000r 2               R_SET   = 0
+000000r 2               R_XOR   = 3
+000000r 2               R_INV   = 4
+000000r 2               S_BOLD  = 1
+000000r 2               S_UNDER = 2
+000000r 2               S_INV   = 8
+000000r 2               S_OPAQUE = 16
+000000r 2               
+000000r 2               ; --- zero page -----------------------------------------------------------------------
+000000r 2               r0      = $02           ; r0-r15: arguments and results, 2 bytes each
+000000r 2               r1      = $04
+000000r 2               r2      = $06
+000000r 2               r3      = $08
+000000r 2               r4      = $0A
+000000r 2               r5      = $0C
+000000r 2               RX0     = $22           ; the rectangle the drawing helpers use
+000000r 2               RY0     = $24
+000000r 2               RX1     = $26
+000000r 2               RY1     = $28
+000000r 2               DX0     = $2A           ; damage rectangle (redraw pass)
+000000r 2               DY0     = $2C
+000000r 2               DX1     = $2E
+000000r 2               DY1     = $30
+000000r 2               TP      = $32           ; text pointer
+000000r 2               QP      = $34           ; second pointer
+000000r 2               T0      = $36           ; temporaries
+000000r 2               T1      = $38
+000000r 2               T2      = $3A
+000000r 2               T3      = $3C
+000000r 2               WP      = $3E           ; pointer to a window record
+000000r 2               CBANK   = $40           ; the caller's bank (set by the dispatcher)
+000000r 2               EVX     = $41           ; event being returned: X, Y
+000000r 2               EVY     = $42
+000000r 2               TMPB    = $43
+000000r 2               TMPC    = $44
+000000r 2               MX      = $46           ; mouse position, 2 bytes each
+000000r 2               MY      = $48
+000000r 2               NUMW    = $4A           ; number of windows open
+000000r 2               FRONTW  = $4B           ; window in front ($FF none)
+000000r 2               PASSON  = $4C           ; nonzero: a redraw pass is going on
+000000r 2               PEND    = $4D           ; windows still to redraw (bit per window)
+000000r 2               UPDW    = $4E           ; window of the UPDATE being drawn ($FF none)
+000000r 2               NMENU   = $4F           ; menus in the bar
+000000r 2               DAMAGE  = $50           ; nonzero: DX0..DY1 must be redrawn
+000000r 2               
+000000r 2               ; --- fixed RAM ----------------------------------------------------------------------
+000000r 2               WINREC  = $0200         ; 8 window records of 32 bytes
+000000r 2               W_USED  = 0             ;  1 if open
+000000r 2               W_X0    = 1             ;  outer rectangle (the shadow is 2 more right/down)
+000000r 2               W_Y0    = 3
+000000r 2               W_X1    = 5
+000000r 2               W_Y1    = 7
+000000r 2               W_TITLE = 9             ;  title, up to 22 characters + 0
+000000r 2               ZORDER  = $0300         ; window numbers, back to front (NUMW of them)
+000000r 2               MTL     = $0308         ; menu: title address, low / high (8 + 8)
+000000r 2               MTH     = $0310
+000000r 2               MFIRST  = $0318         ; menu: first item number (8)
+000000r 2               MCOUNT  = $0320         ; menu: number of items (8)
+000000r 2               MXL     = $0328         ; menu: title x position, low / high (8 + 8)
+000000r 2               MXH     = $0330
+000000r 2               MWIDTH  = $0338         ; menu: width of its box in characters (8)
+000000r 2               IPL     = $0340         ; item: text address, low / high (64 + 64)
+000000r 2               IPH     = $0380
+000000r 2               IFLAG   = $03C0         ; item: 1 enabled, 2 separator (64)
+000000r 2               IKEY    = $0400         ; item: Ctrl+key shortcut letter, 0 none (64)
+000000r 2               MTEXT   = $0480         ; menu texts
+000000r 2               MTEXTEND = $07FE
+000000r 2               MAGIC   = $07FE         ; "TK" while a toolkit program runs
+000000r 2               STRBUF  = $C000         ; strings copied from the caller (dialogs)
+000000r 2               STRBUF2 = $C100
+000000r 2               ASKBUF  = $C200
+000000r 2               
+000000r 2               MAXWIN  = 8
+000000r 2               MAXMENU = 8
+000000r 2               MAXITEM = 64
+000000r 2               TITLEH  = 19            ; window title bar: rows y0..y0+18, line at y0+19
+000000r 2               MENUH   = 19            ; menu bar: rows 0..18, line at 19
+000000r 2               
+000000r 2               ; --- helpers ---------------------------------------------------------------------------
+000000r 2               .macro  LDW dst, val            ; dst = 16-bit constant
+000000r 2                       lda #<(val)
+000000r 2                       sta dst
+000000r 2                       lda #>(val)
+000000r 2                       sta dst+1
+000000r 2               .endmacro
+000000r 2               .macro  MOVW dst, src           ; dst = src (16-bit)
+000000r 2                       lda src
+000000r 2                       sta dst
+000000r 2                       lda src+1
+000000r 2                       sta dst+1
+000000r 2               .endmacro
+000000r 2               .macro  ADDW dst, src, val      ; dst = src + constant
+000000r 2                       lda src
+000000r 2                       clc
+000000r 2                       adc #<(val)
+000000r 2                       sta dst
+000000r 2                       lda src+1
+000000r 2                       adc #>(val)
+000000r 2                       sta dst+1
+000000r 2               .endmacro
+000000r 2               .macro  SUBW dst, src, val      ; dst = src - constant
+000000r 2                       lda src
+000000r 2                       sec
+000000r 2                       sbc #<(val)
+000000r 2                       sta dst
+000000r 2                       lda src+1
+000000r 2                       sbc #>(val)
+000000r 2                       sta dst+1
+000000r 2               .endmacro
+000000r 2               .macro  FAR bank, addr          ; call into another bank: returns to whoever
+000000r 2                                               ; called the routine this is in (use it as
+000000r 2                                               ; the whole body of a routine called by JSR)
+000000r 2                       jsr $FFD0
+000000r 2                       .byte bank
+000000r 2                       .word addr
+000000r 2               .endmacro
+000000r 2               
+000000r 1               
+000000r 1               TOOL    = $CC88                 ; far-call entry 16: the toolkit
+000000r 1               
+000000r 1               .macro  TK fn
+000000r 1                       lda #fn
+000000r 1                       jsr TOOL
+000000r 1               .endmacro
+000000r 1               
+000000r 1               MAXPT   = 16
+000000r 1               A0      = $80               ; this program's zero page ($80-$FF is ours)
+000000r 1               A1      = $82
+000000r 1               A2      = $84
+000000r 1               A3      = $86
+000000r 1               AP      = $88
+000000r 1               
+000000r 1                       .org $E000
+00E000  1               
+00E000  1  4C 05 E0             jmp start               ; $E000
+00E003  1  54 4B                .byte "TK"              ; $E003: a toolkit program (for the desktop)
+00E005  1               start:
+00E005  1  A9 00 20 88          TK TK_INIT
+00E009  1  CC           
+00E00A  1  A9 E0 85 02          LDW r0, menus
+00E00E  1  A9 E3 85 03  
+00E012  1  A9 02 20 88          TK TK_MENUBAR
+00E016  1  CC           
+00E017  1  A9 00                lda #0
+00E019  1  A2 07                ldx #MAXWIN - 1
+00E01B  1  9D 6E E5     @c:     sta wused,x
+00E01E  1  9D 76 E5             sta npts,x
+00E021  1  9D 7E E5             sta lastkey,x
+00E024  1  CA                   dex
+00E025  1  10 F4                bpl @c
+00E027  1  A9 00                lda #0
+00E029  1  8D 88 E5             sta nextpos
+00E02C  1  A9 70 85 0A          LDW r4, s_welcome
+00E030  1  A9 E4 85 0B  
+00E034  1  20 48 E1             jsr newwin
+00E037  1  A9 78 85 0A          LDW r4, s_notes
+00E03B  1  A9 E4 85 0B  
+00E03F  1  20 48 E1             jsr newwin
+00E042  1               
+00E042  1               ; --- the event loop --------------------------------------------------------------------
+00E042  1  A9 06 20 88  loop:   TK TK_GETEVENT
+00E046  1  CC           
+00E047  1  C9 04                cmp #EV_UPDATE
+00E049  1  D0 06                bne @n1
+00E04B  1  20 65 E2             jsr update
+00E04E  1  4C 42 E0             jmp loop
+00E051  1  C9 02        @n1:    cmp #EV_MENU
+00E053  1  D0 06                bne @n2
+00E055  1  20 79 E0             jsr menu
+00E058  1  4C 42 E0             jmp loop
+00E05B  1  C9 03        @n2:    cmp #EV_CLICK
+00E05D  1  D0 06                bne @n3
+00E05F  1  20 EC E1             jsr click
+00E062  1  4C 42 E0             jmp loop
+00E065  1  C9 05        @n3:    cmp #EV_CLOSE
+00E067  1  D0 06                bne @n4
+00E069  1  20 C2 E1             jsr close
+00E06C  1  4C 42 E0             jmp loop
+00E06F  1  C9 01        @n4:    cmp #EV_KEY
+00E071  1  D0 CF                bne loop
+00E073  1  20 37 E2             jsr key
+00E076  1  4C 42 E0             jmp loop
+00E079  1               
+00E079  1               ; --- menus ---------------------------------------------------------------------------------
+00E079  1  E0 00        menu:   cpx #0
+00E07B  1  D0 16                bne @file
+00E07D  1  A9 87 85 02          LDW r0, s_about         ; About
+00E081  1  A9 E4 85 03  
+00E085  1  A9 00 85 04          LDW r1, 0
+00E089  1  A9 00 85 05  
+00E08D  1  A9 09 20 88          TK TK_ALERT
+00E091  1  CC           
+00E092  1  60                   rts
+00E093  1  E0 01        @file:  cpx #1
+00E095  1  D0 38                bne @win
+00E097  1  C0 00                cpy #0
+00E099  1  D0 03                bne @f1
+00E09B  1  4C 10 E1             jmp newask              ; New window...
+00E09E  1  C0 01        @f1:    cpy #1
+00E0A0  1  D0 08                bne @f3
+00E0A2  1  20 54 E2             jsr getfront            ; Close window
+00E0A5  1  30 68                bmi @r
+00E0A7  1  4C C2 E1             jmp close
+00E0AA  1  C0 03        @f3:    cpy #3
+00E0AC  1  D0 61                bne @r
+00E0AE  1  A9 C6 85 02          LDW r0, s_quit          ; Quit
+00E0B2  1  A9 E4 85 03  
+00E0B6  1  A9 DF 85 04          LDW r1, s_quitbtn
+00E0BA  1  A9 E4 85 05  
+00E0BE  1  A9 09 20 88          TK TK_ALERT
+00E0C2  1  CC           
+00E0C3  1  C9 00                cmp #0
+00E0C5  1  D0 48                bne @r
+00E0C7  1  A9 01 20 88          TK TK_EXIT              ; everything back as it was
+00E0CB  1  CC           
+00E0CC  1  68                   pla                     ; and return to whoever started us
+00E0CD  1  68                   pla
+00E0CE  1  60                   rts
+00E0CF  1  E0 03        @win:   cpx #3
+00E0D1  1  D0 3C                bne @r
+00E0D3  1  C0 00                cpy #0
+00E0D5  1  D0 13                bne @w1
+00E0D7  1  20 54 E2             jsr getfront            ; Clear the clicks of the front window
+00E0DA  1  30 33                bmi @r
+00E0DC  1  A9 00                lda #0
+00E0DE  1  9D 76 E5             sta npts,x
+00E0E1  1  9D 7E E5             sta lastkey,x
+00E0E4  1  A9 0C 20 88          TK TK_INVAL
+00E0E8  1  CC           
+00E0E9  1  60                   rts
+00E0EA  1  C0 01        @w1:    cpy #1
+00E0EC  1  D0 21                bne @r
+00E0EE  1  20 54 E2             jsr getfront            ; Next window: bring the next one to the front
+00E0F1  1  A0 08                ldy #MAXWIN
+00E0F3  1  88           @nx:    dey
+00E0F4  1  30 19                bmi @r
+00E0F6  1  AD 86 E5             lda front
+00E0F9  1  18                   clc
+00E0FA  1  69 01                adc #1
+00E0FC  1  29 07                and #MAXWIN - 1
+00E0FE  1  8D 86 E5             sta front
+00E101  1  AA                   tax
+00E102  1  BD 6E E5             lda wused,x
+00E105  1  D0 03                bne @go
+00E107  1  4C F3 E0             jmp @nx
+00E10A  1  A9 0D 20 88  @go:    TK TK_FRONT
+00E10E  1  CC           
+00E10F  1  60           @r:     rts
+00E110  1               
+00E110  1               ; New window: asks for its name
+00E110  1  A2 00        newask: ldx #0                  ; default: "Untitled"
+00E112  1  BD 7E E4     @c:     lda s_untitled,x
+00E115  1  9D 89 E5             sta askbuf,x
+00E118  1  F0 03                beq @a
+00E11A  1  E8                   inx
+00E11B  1  D0 F5                bne @c
+00E11D  1  A9 0B 85 02  @a:     LDW r0, s_ask
+00E121  1  A9 E5 85 03  
+00E125  1  A9 89 85 04          LDW r1, askbuf
+00E129  1  A9 E5 85 05  
+00E12D  1  A9 14 85 06          LDW r2, 20
+00E131  1  A9 00 85 07  
+00E135  1  A9 0A 20 88          TK TK_ASK
+00E139  1  CC           
+00E13A  1  B0 0B                bcs @r
+00E13C  1  A9 89 85 0A          LDW r4, askbuf
+00E140  1  A9 E5 85 0B  
+00E144  1  4C 48 E1             jmp newwin
+00E147  1  60           @r:     rts
+00E148  1               
+00E148  1               ; Opens a window titled r4, a little lower right than the last one
+00E148  1  AD 88 E5     newwin: lda nextpos
+00E14B  1  0A                   asl                     ; x0 = 40 + n * 32, y0 = 40 + n * 24
+00E14C  1  0A                   asl
+00E14D  1  0A                   asl
+00E14E  1  0A                   asl
+00E14F  1  0A                   asl
+00E150  1  18                   clc
+00E151  1  69 28                adc #40
+00E153  1  85 02                sta r0
+00E155  1  A9 00                lda #0
+00E157  1  69 00                adc #0
+00E159  1  85 03                sta r0+1
+00E15B  1  AD 88 E5             lda nextpos
+00E15E  1  0A                   asl
+00E15F  1  0A                   asl
+00E160  1  0A                   asl
+00E161  1  85 80                sta A0
+00E163  1  0A                   asl
+00E164  1  18                   clc
+00E165  1  65 80                adc A0
+00E167  1  69 28                adc #40
+00E169  1  85 04                sta r1
+00E16B  1  A9 00                lda #0
+00E16D  1  85 05                sta r1+1
+00E16F  1  A5 02 18 69          ADDW r2, r0, 300
+00E173  1  2C 85 06 A5  
+00E177  1  03 69 01 85  
+00E17C  1  A5 04 18 69          ADDW r3, r1, 170
+00E180  1  AA 85 08 A5  
+00E184  1  05 69 00 85  
+00E189  1  AD 88 E5             lda nextpos
+00E18C  1  18                   clc
+00E18D  1  69 01                adc #1
+00E18F  1  29 07                and #7
+00E191  1  8D 88 E5             sta nextpos
+00E194  1  A9 04 20 88          TK TK_OPENWIN
+00E198  1  CC           
+00E199  1  B0 11                bcs @full
+00E19B  1  A9 01                lda #1
+00E19D  1  9D 6E E5             sta wused,x
+00E1A0  1  A9 00                lda #0
+00E1A2  1  9D 76 E5             sta npts,x
+00E1A5  1  9D 7E E5             sta lastkey,x
+00E1A8  1  8E 86 E5             stx front
+00E1AB  1  60                   rts
+00E1AC  1  A9 23 85 02  @full:  LDW r0, s_full
+00E1B0  1  A9 E5 85 03  
+00E1B4  1  A9 00 85 04          LDW r1, 0
+00E1B8  1  A9 00 85 05  
+00E1BC  1  A9 09 20 88          TK TK_ALERT
+00E1C0  1  CC           
+00E1C1  1  60                   rts
+00E1C2  1               
+00E1C2  1               ; Close box (or File/Close window): asks first
+00E1C2  1  8E 87 E5     close:  stx curwin
+00E1C5  1  A9 EB 85 02          LDW r0, s_close
+00E1C9  1  A9 E4 85 03  
+00E1CD  1  A9 FE 85 04          LDW r1, s_closebtn
+00E1D1  1  A9 E4 85 05  
+00E1D5  1  A9 09 20 88          TK TK_ALERT
+00E1D9  1  CC           
+00E1DA  1  C9 00                cmp #0
+00E1DC  1  D0 0D                bne @r
+00E1DE  1  AE 87 E5             ldx curwin
+00E1E1  1  A9 00                lda #0
+00E1E3  1  9D 6E E5             sta wused,x
+00E1E6  1  A9 05 20 88          TK TK_CLOSEWIN
+00E1EA  1  CC           
+00E1EB  1  60           @r:     rts
+00E1EC  1               
+00E1EC  1               ; --- clicks and keys -------------------------------------------------------------------
+00E1EC  1  E0 08        click:  cpx #MAXWIN             ; the desktop: nothing
+00E1EE  1  B0 46                bcs @r
+00E1F0  1  8E 86 E5             stx front
+00E1F3  1  8E 87 E5             stx curwin
+00E1F6  1  BD 76 E5             lda npts,x              ; remember the point (up to 16)
+00E1F9  1  C9 10                cmp #MAXPT
+00E1FB  1  B0 39                bcs @r
+00E1FD  1  85 80                sta A0
+00E1FF  1  8A                   txa                     ; index = window * 16 + n
+00E200  1  0A                   asl
+00E201  1  0A                   asl
+00E202  1  0A                   asl
+00E203  1  0A                   asl
+00E204  1  18                   clc
+00E205  1  65 80                adc A0
+00E207  1  A8                   tay
+00E208  1  A5 02                lda r0
+00E20A  1  99 A1 E5             sta ptxl,y
+00E20D  1  A5 03                lda r0+1
+00E20F  1  99 21 E6             sta ptxh,y
+00E212  1  A5 04                lda r1
+00E214  1  99 A1 E6             sta ptyl,y
+00E217  1  A5 05                lda r1+1
+00E219  1  99 21 E7             sta ptyh,y
+00E21C  1  FE 76 E5             inc npts,x
+00E21F  1  84 86                sty A3                  ; draw it now (it is the front window)
+00E221  1  A9 08 20 88          TK TK_SETPORT
+00E225  1  CC           
+00E226  1  A4 86                ldy A3
+00E228  1  20 45 E3             jsr drawpt
+00E22B  1  AE 87 E5             ldx curwin
+00E22E  1  A9 08 20 88          TK TK_SETPORT           ; and the count
+00E232  1  CC           
+00E233  1  20 88 E2             jsr drawinfo
+00E236  1  60           @r:     rts
+00E237  1               
+00E237  1  86 80        key:    stx A0
+00E239  1  20 54 E2             jsr getfront
+00E23C  1  30 15                bmi @r
+00E23E  1  A6 80                ldx A0
+00E240  1  AC 86 E5             ldy front
+00E243  1  8A                   txa                     ; the character (0 for arrows and such)
+00E244  1  D0 02                bne @k
+00E246  1  A9 3F                lda #'?'
+00E248  1  99 7E E5     @k:     sta lastkey,y
+00E24B  1  AE 86 E5             ldx front
+00E24E  1  A9 0C 20 88          TK TK_INVAL             ; drawn again by the next UPDATE
+00E252  1  CC           
+00E253  1  60           @r:     rts
+00E254  1               
+00E254  1               ; X = front = the window in front ($FF, N set, if none)
+00E254  1               getfront:
+00E254  1  A2 FF                ldx #$FF
+00E256  1  A9 0D 20 88          TK TK_FRONT
+00E25A  1  CC           
+00E25B  1  8E 86 E5             stx front
+00E25E  1  E0 FF                cpx #$FF
+00E260  1  D0 02                bne @r
+00E262  1  A2 FF                ldx #$FF                ; (N set)
+00E264  1  60           @r:     rts
+00E265  1               
+00E265  1               ; --- drawing a window's contents (clip and r0-r3 set by the toolkit) ---------
+00E265  1  8E 87 E5     update: stx curwin
+00E268  1  20 88 E2             jsr drawinfo
+00E26B  1  AE 87 E5             ldx curwin              ; all its points
+00E26E  1  BD 76 E5             lda npts,x
+00E271  1  F0 14                beq @r
+00E273  1  85 84                sta A2
+00E275  1  8A                   txa
+00E276  1  0A                   asl
+00E277  1  0A                   asl
+00E278  1  0A                   asl
+00E279  1  0A                   asl
+00E27A  1  A8                   tay
+00E27B  1  84 86        @p:     sty A3
+00E27D  1  20 45 E3             jsr drawpt
+00E280  1  A4 86                ldy A3
+00E282  1  C8                   iny
+00E283  1  C6 84                dec A2
+00E285  1  D0 F4                bne @p
+00E287  1  60           @r:     rts
+00E288  1               
+00E288  1               ; Text lines at the top of window curwin (r0-r3 = its contents)
+00E288  1               drawinfo:
+00E288  1  A9 00                lda #0                  ; white strip first (the count changes)
+00E28A  1  8D 28 D3             sta ROP
+00E28D  1  8D 29 D3             sta PATON
+00E290  1  8D 2B D3             sta STYLE
+00E293  1  A5 02                lda r0
+00E295  1  8D 10 D3             sta BX0
+00E298  1  A5 03                lda r0+1
+00E29A  1  8D 1A D3             sta BX0H
+00E29D  1  A5 04                lda r1
+00E29F  1  8D 11 D3             sta BY0
+00E2A2  1  A5 05                lda r1+1
+00E2A4  1  8D 1B D3             sta BY0H
+00E2A7  1  A5 06                lda r2
+00E2A9  1  8D 12 D3             sta BX1
+00E2AC  1  A5 07                lda r2+1
+00E2AE  1  8D 1C D3             sta BX1H
+00E2B1  1  A5 04 18 69          ADDW A0, r1, 60
+00E2B5  1  3C 85 80 A5  
+00E2B9  1  05 69 00 85  
+00E2BE  1  A5 80                lda A0
+00E2C0  1  8D 13 D3             sta BY1
+00E2C3  1  A5 81                lda A0+1
+00E2C5  1  8D 1D D3             sta BY1H
+00E2C8  1  A9 00                lda #0
+00E2CA  1  8D 14 D3             sta BCOL
+00E2CD  1  A9 05                lda #C_BOXF
+00E2CF  1  8D 18 D3             sta BCMD
+00E2D2  1  A5 02 18 69          ADDW A0, r0, 8          ; line 1
+00E2D6  1  08 85 80 A5  
+00E2DA  1  03 69 00 85  
+00E2DF  1  A5 04 18 69          ADDW A1, r1, 6
+00E2E3  1  06 85 82 A5  
+00E2E7  1  05 69 00 85  
+00E2EC  1  20 9C E3             jsr at
+00E2EF  1  A9 3F 85 88          LDW AP, s_info1
+00E2F3  1  A9 E5 85 89  
+00E2F7  1  20 B1 E3             jsr str
+00E2FA  1  A5 82 18 69          ADDW A1, A1, 18         ; line 2: clicks
+00E2FE  1  12 85 82 A5  
+00E302  1  83 69 00 85  
+00E307  1  20 9C E3             jsr at
+00E30A  1  A9 5A 85 88          LDW AP, s_info2
+00E30E  1  A9 E5 85 89  
+00E312  1  20 B1 E3             jsr str
+00E315  1  AE 87 E5             ldx curwin
+00E318  1  BD 76 E5             lda npts,x
+00E31B  1  20 BE E3             jsr dec3
+00E31E  1  A5 82 18 69          ADDW A1, A1, 18         ; line 3: last key
+00E322  1  12 85 82 A5  
+00E326  1  83 69 00 85  
+00E32B  1  20 9C E3             jsr at
+00E32E  1  A9 63 85 88          LDW AP, s_info3
+00E332  1  A9 E5 85 89  
+00E336  1  20 B1 E3             jsr str
+00E339  1  AE 87 E5             ldx curwin
+00E33C  1  BD 7E E5             lda lastkey,x
+00E33F  1  F0 03                beq @r
+00E341  1  8D 2C D3             sta CHOUT
+00E344  1  60           @r:     rts
+00E345  1               
+00E345  1               ; Filled 5x5 square at point Y of curwin (relative to r0, r1)
+00E345  1  A9 00        drawpt: lda #0
+00E347  1  8D 28 D3             sta ROP
+00E34A  1  8D 29 D3             sta PATON
+00E34D  1  A5 02                lda r0
+00E34F  1  18                   clc
+00E350  1  79 A1 E5             adc ptxl,y
+00E353  1  8D 10 D3             sta BX0
+00E356  1  A5 03                lda r0+1
+00E358  1  79 21 E6             adc ptxh,y
+00E35B  1  8D 1A D3             sta BX0H
+00E35E  1  A5 04                lda r1
+00E360  1  18                   clc
+00E361  1  79 A1 E6             adc ptyl,y
+00E364  1  8D 11 D3             sta BY0
+00E367  1  A5 05                lda r1+1
+00E369  1  79 21 E7             adc ptyh,y
+00E36C  1  8D 1B D3             sta BY0H
+00E36F  1  AD 10 D3             lda BX0
+00E372  1  18                   clc
+00E373  1  69 04                adc #4
+00E375  1  8D 12 D3             sta BX1
+00E378  1  AD 1A D3             lda BX0H
+00E37B  1  69 00                adc #0
+00E37D  1  8D 1C D3             sta BX1H
+00E380  1  AD 11 D3             lda BY0
+00E383  1  18                   clc
+00E384  1  69 04                adc #4
+00E386  1  8D 13 D3             sta BY1
+00E389  1  AD 1B D3             lda BY0H
+00E38C  1  69 00                adc #0
+00E38E  1  8D 1D D3             sta BY1H
+00E391  1  A9 01                lda #1
+00E393  1  8D 14 D3             sta BCOL
+00E396  1  A9 05                lda #C_BOXF
+00E398  1  8D 18 D3             sta BCMD
+00E39B  1  60                   rts
+00E39C  1               
+00E39C  1  A5 80        at:     lda A0
+00E39E  1  8D 10 D3             sta BX0
+00E3A1  1  A5 81                lda A0+1
+00E3A3  1  8D 1A D3             sta BX0H
+00E3A6  1  A5 82                lda A1
+00E3A8  1  8D 11 D3             sta BY0
+00E3AB  1  A5 83                lda A1+1
+00E3AD  1  8D 1B D3             sta BY0H
+00E3B0  1  60                   rts
+00E3B1  1               
+00E3B1  1  A0 00        str:    ldy #0
+00E3B3  1  B1 88        @l:     lda (AP),y
+00E3B5  1  F0 06                beq @e
+00E3B7  1  8D 2C D3             sta CHOUT
+00E3BA  1  C8                   iny
+00E3BB  1  D0 F6                bne @l
+00E3BD  1  60           @e:     rts
+00E3BE  1               
+00E3BE  1               ; A as 3 decimal digits
+00E3BE  1  A2 30        dec3:   ldx #'0'
+00E3C0  1  C9 64        @h:     cmp #100
+00E3C2  1  90 05                bcc @t
+00E3C4  1  E9 64                sbc #100
+00E3C6  1  E8                   inx
+00E3C7  1  D0 F7                bne @h
+00E3C9  1  8E 2C D3     @t:     stx CHOUT
+00E3CC  1  A2 30                ldx #'0'
+00E3CE  1  C9 0A        @t2:    cmp #10
+00E3D0  1  90 05                bcc @o
+00E3D2  1  E9 0A                sbc #10
+00E3D4  1  E8                   inx
+00E3D5  1  D0 F7                bne @t2
+00E3D7  1  8E 2C D3     @o:     stx CHOUT
+00E3DA  1  09 30                ora #'0'
+00E3DC  1  8D 2C D3             sta CHOUT
+00E3DF  1  60                   rts
+00E3E0  1               
+00E3E0  1               ; --- data ------------------------------------------------------------------------------------
+00E3E0  1  6D 69 6E 69  menus:  .byte "mini6502", 0
+00E3E4  1  36 35 30 32  
+00E3E8  1  00           
+00E3E9  1  41 62 6F 75          .byte "About TKTEST...", 0
+00E3ED  1  74 20 54 4B  
+00E3F1  1  54 45 53 54  
+00E3F9  1  00                   .byte 0
+00E3FA  1  46 69 6C 65          .byte "File", 0
+00E3FE  1  00           
+00E3FF  1  4E 65 77 20          .byte "New window.../N", 0
+00E403  1  77 69 6E 64  
+00E407  1  6F 77 2E 2E  
+00E40F  1  43 6C 6F 73          .byte "Close window/W", 0
+00E413  1  65 20 77 69  
+00E417  1  6E 64 6F 77  
+00E41E  1  2D 00                .byte "-", 0
+00E420  1  51 75 69 74          .byte "Quit/Q", 0
+00E424  1  2F 51 00     
+00E427  1  00                   .byte 0
+00E428  1  45 64 69 74          .byte "Edit", 0
+00E42C  1  00           
+00E42D  1  28 55 6E 64          .byte "(Undo/Z", 0
+00E431  1  6F 2F 5A 00  
+00E435  1  2D 00                .byte "-", 0
+00E437  1  28 43 75 74          .byte "(Cut", 0
+00E43B  1  00           
+00E43C  1  28 43 6F 70          .byte "(Copy", 0
+00E440  1  79 00        
+00E442  1  28 50 61 73          .byte "(Paste", 0
+00E446  1  74 65 00     
+00E449  1  00                   .byte 0
+00E44A  1  57 69 6E 64          .byte "Window", 0
+00E44E  1  6F 77 00     
+00E451  1  43 6C 65 61          .byte "Clear clicks/K", 0
+00E455  1  72 20 63 6C  
+00E459  1  69 63 6B 73  
+00E460  1  4E 65 78 74          .byte "Next window/T", 0
+00E464  1  20 77 69 6E  
+00E468  1  64 6F 77 2F  
+00E46E  1  00                   .byte 0
+00E46F  1  00                   .byte 0
+00E470  1               
+00E470  1  57 65 6C 63  s_welcome:  .byte "Welcome", 0
+00E474  1  6F 6D 65 00  
+00E478  1  4E 6F 74 65  s_notes:    .byte "Notes", 0
+00E47C  1  73 00        
+00E47E  1  55 6E 74 69  s_untitled: .byte "Untitled", 0
+00E482  1  74 6C 65 64  
+00E486  1  00           
+00E487  1  54 4B 54 45  s_about:    .byte "TKTEST - a test of the mini6502 desktop toolkit", 13
+00E48B  1  53 54 20 2D  
+00E48F  1  20 61 20 74  
+00E4B7  1  50 75 62 6C              .byte "Public domain.", 0
+00E4BB  1  69 63 20 64  
+00E4BF  1  6F 6D 61 69  
+00E4C6  1  51 75 69 74  s_quit:     .byte "Quit TKTEST and go back?", 0
+00E4CA  1  20 54 4B 54  
+00E4CE  1  45 53 54 20  
+00E4DF  1  51 75 69 74  s_quitbtn:  .byte "Quit|Cancel", 0
+00E4E3  1  7C 43 61 6E  
+00E4E7  1  63 65 6C 00  
+00E4EB  1  43 6C 6F 73  s_close:    .byte "Close this window?", 0
+00E4EF  1  65 20 74 68  
+00E4F3  1  69 73 20 77  
+00E4FE  1  43 6C 6F 73  s_closebtn: .byte "Close|Cancel", 0
+00E502  1  65 7C 43 61  
+00E506  1  6E 63 65 6C  
+00E50B  1  4E 61 6D 65  s_ask:      .byte "Name of the new window:", 0
+00E50F  1  20 6F 66 20  
+00E513  1  74 68 65 20  
+00E523  1  4E 6F 20 6D  s_full:     .byte "No more windows: 8 at most.", 0
+00E527  1  6F 72 65 20  
+00E52B  1  77 69 6E 64  
+00E53F  1  43 6C 69 63  s_info1:    .byte "Click in here, type a key.", 0
+00E543  1  6B 20 69 6E  
+00E547  1  20 68 65 72  
+00E55A  1  43 6C 69 63  s_info2:    .byte "Clicks: ", 0
+00E55E  1  6B 73 3A 20  
+00E562  1  00           
+00E563  1  4C 61 73 74  s_info3:    .byte "Last key: ", 0
+00E567  1  20 6B 65 79  
+00E56B  1  3A 20 00     
+00E56E  1               
+00E56E  1               ; --- variables (in this bank) ------------------------------------------------------
+00E56E  1  xx xx xx xx  wused:  .res MAXWIN
+00E572  1  xx xx xx xx  
+00E576  1  xx xx xx xx  npts:   .res MAXWIN
+00E57A  1  xx xx xx xx  
+00E57E  1  xx xx xx xx  lastkey: .res MAXWIN
+00E582  1  xx xx xx xx  
+00E586  1  xx           front:  .res 1
+00E587  1  xx           curwin: .res 1
+00E588  1  xx           nextpos: .res 1
+00E589  1  xx xx xx xx  askbuf: .res 24
+00E58D  1  xx xx xx xx  
+00E591  1  xx xx xx xx  
+00E5A1  1  xx xx xx xx  ptxl:   .res MAXWIN * MAXPT
+00E5A5  1  xx xx xx xx  
+00E5A9  1  xx xx xx xx  
+00E621  1  xx xx xx xx  ptxh:   .res MAXWIN * MAXPT
+00E625  1  xx xx xx xx  
+00E629  1  xx xx xx xx  
+00E6A1  1  xx xx xx xx  ptyl:   .res MAXWIN * MAXPT
+00E6A5  1  xx xx xx xx  
+00E6A9  1  xx xx xx xx  
+00E721  1  xx xx xx xx  ptyh:   .res MAXWIN * MAXPT
+00E725  1  xx xx xx xx  
+00E729  1  xx xx xx xx  
+00E721  1               
