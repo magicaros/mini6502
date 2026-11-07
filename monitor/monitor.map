@@ -1,0 +1,42 @@
+Modules list:
+-------------
+monitor.o:
+    CODE              Offs=000000  Size=000D7E  Align=00001  Fill=0000
+    WOZ_RESET         Offs=000000  Size=000003  Align=00001  Fill=0000
+    WOZ_GETLINE       Offs=000000  Size=000003  Align=00001  Fill=0000
+    SYSCALLS          Offs=000000  Size=000012  Align=00001  Fill=0000
+    FARCALL           Offs=000000  Size=000003  Align=00001  Fill=0000
+    WOZ_PRBYTE        Offs=000000  Size=000003  Align=00001  Fill=0000
+    WOZ_PRHEX         Offs=000000  Size=000003  Align=00001  Fill=0000
+    WOZ_ECHO          Offs=000000  Size=000003  Align=00001  Fill=0000
+    VECTORS           Offs=000000  Size=000006  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  00F000  00FD7D  000D7E  00001
+WOZ_RESET             00FF00  00FF02  000003  00001
+WOZ_GETLINE           00FF1F  00FF21  000003  00001
+SYSCALLS              00FFB0  00FFC1  000012  00001
+FARCALL               00FFD0  00FFD2  000003  00001
+WOZ_PRBYTE            00FFDC  00FFDE  000003  00001
+WOZ_PRHEX             00FFE5  00FFE7  000003  00001
+WOZ_ECHO              00FFEF  00FFF1  000003  00001
+VECTORS               00FFFA  00FFFF  000006  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

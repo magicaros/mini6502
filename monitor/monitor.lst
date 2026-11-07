@@ -1,0 +1,1755 @@
+ca65 V2.19 - Git 52727a5
+Main file   : monitor.asm
+Current file: monitor.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; monitor.asm - the mini6502 system monitor                    (ROM $F000-$FFFF)
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain. An original monitor for mini6502, written to feel like the
+000000r 1               ; Woz Monitor (same commands, same entry points) while leaving 4K to grow in.
+000000r 1               ;
+000000r 1               ; Build (cc65 suite):  ca65 monitor.asm -o monitor.o -l monitor.lst
+000000r 1               ;                      ld65 -C monitor.cfg monitor.o -o monitor.bin
+000000r 1               ;
+000000r 1               ; Commands (several per line, separated by spaces; hex, upper or lower case)
+000000r 1               ;   HHHH            show the byte at HHHH
+000000r 1               ;   HHHH.HHHH       show a range, 8 bytes per line
+000000r 1               ;   .HHHH           continue showing from the last address up to HHHH
+000000r 1               ;   HHHH: BB BB ..  store bytes from HHHH on (shows the old byte at HHHH,
+000000r 1               ;                   except for I/O addresses $Dxxx, where reading can have
+000000r 1               ;                   an effect: a data port moves on, KBD takes the key);
+000000r 1               ;                   a 3-4 digit number starts a new address: D020: 05 D021: 1E
+000000r 1               ;   : BB BB ..      store at the last address shown, or after the last byte stored
+000000r 1               ;   HHHH R          run the program at HHHH; an RTS comes back to the monitor
+000000r 1               ;   R               run again at the last address shown
+000000r 1               ;   S NAME HHHH.HHHH  save HHHH..HHHH (end included) to the file NAME
+000000r 1               ;   S NAME HHHH.HHHH BB   ... with bank BB at $E000-$EFFF while saving
+000000r 1               ;   L NAME          load NAME at the address it was saved from
+000000r 1               ;   L NAME HHHH     load NAME at HHHH
+000000r 1               ;   L NAME HHHH BB  load NAME at HHHH with bank BB at $E000-$EFFF
+000000r 1               ;                   (the bank selected before is selected again afterwards)
+000000r 1               ;   V               list the far-call vector table at $CC00
+000000r 1               ;   V NN BB HHHH [NAME]  set entry NN (00-27): a call to it runs HHHH in
+000000r 1               ;                   bank BB; NAME (up to 8 characters) is what VFIND finds
+000000r 1               ;   M               list the bank map: who owns each bank
+000000r 1               ;   M BB OO         set bank BB's owner to OO (00 = free it)
+000000r 1               ;                   after a load, R runs what was loaded
+000000r 1               ;   $               list the files on the disk
+000000r 1               ;   K NAME          delete (kill) the file NAME
+000000r 1               ;   T NAME          type the text file NAME as if typed on the keyboard: a
+000000r 1               ;                   script of monitor commands, which can go on into what
+000000r 1               ;                   it starts (BASIC lines after A000R, for instance)
+000000r 1               ;   W               wipe: clear the screen (C would be read as hex)
+000000r 1               ;   X               exit: quits the mini6502 emulator
+000000r 1               ;   G               go back to the program that set the warm start address
+000000r 1               ;                   ($D002/$D003, e.g. BASIC after SYSTEM or F1)
+000000r 1               ;   ?               short help
+000000r 1               ;   Esc cancels the line, Backspace/Delete erase, Enter executes.
+000000r 1               ;   S, L and $ use the rest of the line. Files are in the "disk" folder next
+000000r 1               ;   to mini6502; names are up to 64 of A-Z 0-9 . _ - (typed in upper case).
+000000r 1               ;
+000000r 1               ; Boot: at power-on (and after a $FF cold reset, not after F1) the monitor
+000000r 1               ; loads the disk file BOOT at its own address and runs it, unless keys are
+000000r 1               ; already waiting (a file typed in from the command line, for instance).
+000000r 1               ; Without a BOOT file it types BOOT.TXT, if there is one, as a script.
+000000r 1               ; Save anything as BOOT to start it automatically, e.g. BASIC:
+000000r 1               ;   L EHBASIC     then     S BOOT A000.CA3C
+000000r 1               ; If there is no BOOT file the monitor just shows its prompt.
+000000r 1               ;
+000000r 1               ; Far calls into banked RAM ($E000-$EFFF, 256 banks of 4K)
+000000r 1               ;   FARCALL $FFD0 switches to a bank, calls an address there, then switches
+000000r 1               ;   back to the caller's bank. It takes its target from the 3 bytes after
+000000r 1               ;   the JSR, so a far call is   JSR $FFD0 / .byte bank / .word address.
+000000r 1               ;   A, X and Y reach the callee unchanged; on return A, X, Y and the carry
+000000r 1               ;   are what the callee left. Calls can nest (banked code can far-call too).
+000000r 1               ;   Uses $E2-$E5 and $EE of the zero page (left free by EhBASIC).
+000000r 1               ;
+000000r 1               ;   The system page $CC00-$CFFF (fixed RAM nothing swaps out; see
+000000r 1               ;   hw/REGISTERS.txt):
+000000r 1               ;     $CC00  "VT"     signature (written by V)
+000000r 1               ;     $CC02  count    number of entries in use
+000000r 1               ;     $CC03-$CC07     reserved
+000000r 1               ;     $CC08 + 8*NN    entry NN (00-27): JSR $FFD0 / bank / address / 2 spare
+000000r 1               ;     $CD48 + 8*NN    entry NN's name (up to 8 characters, 0 after)
+000000r 1               ;     $CE88-$CE8F     the system calls' own variables
+000000r 1               ;     $CF00 + BB      the bank map: bank BB's owner (00 free, FD a main-RAM
+000000r 1               ;                     program, FE loaded by hand, FF system, else a bank)
+000000r 1               ;   At a cold start the monitor sets the map (banks $00-$1F and $C0-$FF
+000000r 1               ;   reserved, the rest free); L NAME HHHH BB marks a free bank FE.
+000000r 1               ;
+000000r 1               ; System calls ($FFB0-$FFC1, JSR from anywhere; not from interrupt
+000000r 1               ; handlers): BALLOC $FFB0 (A owner, X count, Y 0 programs / 1 documents
+000000r 1               ; zone: A = first bank, carry set if no room), BFREE $FFB3 (A bank),
+000000r 1               ; BFREEALL $FFB6 (A owner), BCLAIM $FFB9 (A owner, X bank: carry set if
+000000r 1               ; someone else has it), VFIND $FFBC (X/Y name: A entry, X/Y its address,
+000000r 1               ; carry set if none), BOWNER $FFBF (A bank: A owner).
+000000r 1               ;   Entry NN is called with JSR $CC08+8*NN, or from BASIC with
+000000r 1               ;   CALL 52232+8*NN. Save the table with S VECTORS CC00.CEFF.
+000000r 1               ;
+000000r 1               ; A BRK instruction stops the program and shows where it stopped and the
+000000r 1               ; registers; the monitor's last address is then set to the BRK.
+000000r 1               ;
+000000r 1               ; Interrupts (IRQ, see IRQEN at $D007 in mini6502.bas): the monitor saves A,
+000000r 1               ; X, Y and BANK on the stack, clears D, selects IRQBANK, reads IRQFLAGS into
+000000r 1               ; A (which sources fired; reading also releases the IRQ) and JSRs to the
+000000r 1               ; address in IRQVEC. The handler may use A, X and Y and ends with RTS; the
+000000r 1               ; monitor then puts the bank and the registers back and returns (RTI).
+000000r 1               ; To use them: set IRQVEC and IRQBANK, then IRQEN, then CLI.
+000000r 1               ;
+000000r 1               ; Entry points kept at the Woz Monitor's addresses, so programs written for
+000000r 1               ; it keep working:
+000000r 1               ;   $FF00 RESET    $FF1F GETLINE (monitor prompt)
+000000r 1               ;   $FFDC PRBYTE   $FFE5 PRHEX   $FFEF ECHO (A preserved)
+000000r 1               ; and one of its own:
+000000r 1               ;   $FFD0 FARCALL (see above)
+000000r 1               ;
+000000r 1               ; Memory used: $E6-$ED zero page (left free by EhBASIC, so BASIC and the
+000000r 1               ;              monitor can be used in turn), $0200-$027F input line,
+000000r 1               ;              $0280-$028D monitor variables.
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1               ; --- mini6502 I/O --------------------------------------------------------------
+000000r 1               
+000000r 1               ; --- memory --------------------------------------------------------------------
+000000r 1                       .include "mini6502.inc"     ; the registers (hw/mini6502.inc)
+000000r 2               ; mini6502.inc - made by hw/gen.py from hw/mini6502.def: edit that, not this.
+000000r 2               ; The mini6502's registers, banks, far-call entries and system calls.
+000000r 2               ; In a program: .include "mini6502.inc" (ca65 -I path/to/hw). Including it
+000000r 2               ; twice is fine.
+000000r 2               
+000000r 2               .ifndef MINI6502_INC
+000000r 2               MINI6502_INC = 1
+000000r 2               
+000000r 2               ; registers
+000000r 2               SYSCTL      = $D000   ; read/write
+000000r 2               FRAME       = $D001   ; read
+000000r 2               WARMLO      = $D002   ; read/write
+000000r 2               WARMHI      = $D003   ; read/write
+000000r 2               CLOCKH      = $D004   ; read
+000000r 2               CLOCKM      = $D005   ; read
+000000r 2               CLOCKS      = $D006   ; read
+000000r 2               IRQEN       = $D007   ; read/write
+000000r 2               IRQFLAGS    = $D008   ; read
+000000r 2               IRQBANK     = $D009   ; read/write
+000000r 2               IRQVEC      = $D00A   ; read/write, 2 bytes
+000000r 2               KBD         = $D010   ; read
+000000r 2               KBDCR       = $D011   ; read
+000000r 2               DSP         = $D012   ; write
+000000r 2               DSPCR       = $D013   ; reads 0
+000000r 2               KBDPEEK     = $D014   ; read
+000000r 2               CURX        = $D015   ; read/write
+000000r 2               CURY        = $D016   ; read/write
+000000r 2               VCHR        = $D017   ; read/write
+000000r 2               VCOL        = $D018   ; read/write
+000000r 2               KBDEXT      = $D019   ; read
+000000r 2               BANK        = $D020   ; read/write
+000000r 2               COLOR       = $D021   ; read/write
+000000r 2               SND         = $D030   ; read/write, 16 bytes
+000000r 2               V1          = $D030   ; read/write, 4 bytes
+000000r 2               V2          = $D034   ; read/write, 4 bytes
+000000r 2               V3          = $D038   ; read/write, 4 bytes
+000000r 2               V4          = $D03C   ; read/write, 4 bytes
+000000r 2               SHP         = $D050   ; read/write, 16 bytes
+000000r 2               S1          = $D050   ; read/write, 4 bytes
+000000r 2               S2          = $D054   ; read/write, 4 bytes
+000000r 2               S3          = $D058   ; read/write, 4 bytes
+000000r 2               S4          = $D05C   ; read/write, 4 bytes
+000000r 2               BEEP        = $D100   ; read/write
+000000r 2               DCMD        = $D040   ; read/write
+000000r 2               DSTAT       = $D041   ; read/write
+000000r 2               DSTART      = $D042   ; read/write, 2 bytes
+000000r 2               DEND        = $D044   ; read/write, 2 bytes
+000000r 2               DNAME       = $D046   ; read/write, 2 bytes
+000000r 2               DNLEN       = $D048   ; read/write
+000000r 2               PADR        = $D200   ; read/write, 3 bytes
+000000r 2               PDATA       = $D203   ; read/write
+000000r 2               PSTEP       = $D204   ; read/write
+000000r 2               PBADR       = $D208   ; read/write, 3 bytes
+000000r 2               PBDATA      = $D20B   ; read/write
+000000r 2               PBSTEP      = $D20C   ; read/write
+000000r 2               DMASRC      = $D210   ; read/write, 3 bytes
+000000r 2               DMADST      = $D213   ; read/write, 3 bytes
+000000r 2               DMALEN      = $D216   ; read/write, 3 bytes
+000000r 2               DMACMD      = $D219   ; read/write
+000000r 2               DMAFILL     = $D21A   ; read/write
+000000r 2               DMASTAT     = $D21B   ; read
+000000r 2               VID         = $D300   ; read/write, 64 bytes
+000000r 2               MODE        = $D300   ; read/write
+000000r 2               SHOW        = $D301   ; read/write
+000000r 2               DRAW        = $D302   ; read/write
+000000r 2               INTENS      = $D303   ; read/write
+000000r 2               MASTER      = $D304   ; read/write
+000000r 2               TRANSP      = $D305   ; read/write
+000000r 2               INK         = $D306   ; read/write
+000000r 2               PAPER       = $D307   ; read/write
+000000r 2               PALIDX      = $D308   ; read/write
+000000r 2               PALR        = $D309   ; read/write
+000000r 2               PALG        = $D30A   ; read/write
+000000r 2               PALB        = $D30B   ; read/write
+000000r 2               BX0         = $D310   ; read/write
+000000r 2               BY0         = $D311   ; read/write
+000000r 2               BX1         = $D312   ; read/write
+000000r 2               BY1         = $D313   ; read/write
+000000r 2               BCOL        = $D314   ; read/write
+000000r 2               BDX         = $D315   ; read/write
+000000r 2               BDY         = $D316   ; read/write
+000000r 2               BSRC        = $D317   ; read/write
+000000r 2               BCMD        = $D318   ; read/write
+000000r 2               BPIXEL      = $D319   ; read
+000000r 2               BX0H        = $D31A   ; read/write
+000000r 2               BY0H        = $D31B   ; read/write
+000000r 2               BX1H        = $D31C   ; read/write
+000000r 2               BY1H        = $D31D   ; read/write
+000000r 2               BDXH        = $D31E   ; read/write
+000000r 2               BDYH        = $D31F   ; read/write
+000000r 2               COLLSS      = $D320   ; read, 4 bytes
+000000r 2               COLLBG      = $D324   ; read, 4 bytes
+000000r 2               ROP         = $D328   ; read/write
+000000r 2               PATON       = $D329   ; read/write
+000000r 2               CHR         = $D32A   ; read/write
+000000r 2               STYLE       = $D32B   ; read/write
+000000r 2               CHOUT       = $D32C   ; read/write
+000000r 2               PATTERN     = $D330   ; read/write, 8 bytes
+000000r 2               CLIPR       = $D338   ; read/write, 8 bytes
+000000r 2               SPR         = $D400   ; read/write, 256 bytes
+000000r 2               MOUSEX      = $D500   ; read, 2 bytes
+000000r 2               MOUSEY      = $D502   ; read, 2 bytes
+000000r 2               BUTTONS     = $D504   ; read
+000000r 2               WHEEL       = $D505   ; read
+000000r 2               CLICKS      = $D506   ; read
+000000r 2               PTR         = $D508   ; read/write
+000000r 2               PTRX        = $D509   ; read/write, 2 bytes
+000000r 2               PTRY        = $D50B   ; read/write, 2 bytes
+000000r 2               HOTX        = $D50D   ; read/write
+000000r 2               HOTY        = $D50E   ; read/write
+000000r 2               PTRIMG      = $D510   ; read/write, 32 bytes
+000000r 2               PTRMASK     = $D530   ; read/write, 32 bytes
+000000r 2               MOUSELX     = $D550   ; read
+000000r 2               MOUSELY     = $D551   ; read
+000000r 2               MOUSECOL    = $D552   ; read
+000000r 2               MOUSEROW    = $D553   ; read
+000000r 2               ; numbers
+000000r 2               IRQ_FRAME   = 1
+000000r 2               IRQ_KEY     = 2
+000000r 2               IRQ_MOUSE   = 4
+000000r 2               V_NOTE      = 0
+000000r 2               V_VOL       = 1
+000000r 2               V_WAVE      = 2
+000000r 2               V_DUR       = 3
+000000r 2               S_DECAY     = 0
+000000r 2               S_SWEEP     = 1
+000000r 2               S_PULSE     = 2
+000000r 2               S_BEND      = 3
+000000r 2               C_CLEAR     = 1
+000000r 2               C_PSET      = 2
+000000r 2               C_LINE      = 3
+000000r 2               C_BOX       = 4
+000000r 2               C_BOXF      = 5
+000000r 2               C_COPY      = 6
+000000r 2               C_COPYT     = 7
+000000r 2               C_DIM       = 8
+000000r 2               C_UNDIM     = 9
+000000r 2               C_STAMP     = $0A
+000000r 2               C_CHAR      = $0B
+000000r 2               VTAB        = $CC00
+000000r 2               VTCOUNT     = $CC02
+000000r 2               VTENTRY     = $CC08
+000000r 2               VTMAX       = $28
+000000r 2               VTNAMES     = $CD48
+000000r 2               BANKMAP     = $CF00
+000000r 2               FARCALL     = $FFD0
+000000r 2               ; bank zones (first, last)
+000000r 2               Z_BASICEXT  = 0       ; EhBASIC extensions (kept free for them)
+000000r 2               Z_BASICEXT_END= 7
+000000r 2               Z_USER      = 8       ; yours: load by hand; never handed out
+000000r 2               Z_USER_END  = $0F
+000000r 2               Z_SYSTEM    = $10     ; the system's programs
+000000r 2               Z_SYSTEM_END= $1F
+000000r 2               Z_PROGRAMS  = $20     ; programs (the allocator hands these out)
+000000r 2               Z_PROGRAMS_END= $7F
+000000r 2               Z_DOCUMENTS = $80     ; documents, songs, data (handed out too)
+000000r 2               Z_DOCUMENTS_END= $BF
+000000r 2               Z_SWAP      = $C0     ; the fixed RAM's copies while programs swap it
+000000r 2               Z_SWAP_END  = $FF
+000000r 2               ; fixed banks
+000000r 2               B_LULLABY   = 8       ; the lullaby demo (BOOT.TXT loads it)
+000000r 2               B_TK1       = $10     ; the toolkit, part 1 (TK1)
+000000r 2               B_TK2       = $11     ; the toolkit, part 2 (TK2)
+000000r 2               B_MUSIC     = $12     ; the music engine (MUSIC)
+000000r 2               B_EDIT      = $13     ; the editor (EDIT)
+000000r 2               B_DESK1     = $14     ; the desktop, part 1 (DESK1)
+000000r 2               B_DESK2     = $15     ; the desktop, part 2 (DESK2)
+000000r 2               B_DESK3     = $16     ; the desktop, part 3: icons (DESK3)
+000000r 2               B_LAUNCH    = $20     ; where the desktop loads bank programs
+000000r 2               B_DESKSAVE  = $C0     ; the desktop's RAM while a program runs
+000000r 2               B_TKSWAP    = $D0     ; the caller's RAM while a toolkit program runs
+000000r 2               B_EDITIMG   = $E0     ; the editor's RAM while away
+000000r 2               B_EDITWORLD = $F0     ; the caller's RAM while editing
+000000r 2               ; far-call entries: E_NAME = its address (JSR E_NAME), EN_NAME = its number
+000000r 2               E_LULLABY   = $CC08   ; plays the lullaby
+000000r 2               EN_LULLABY  = 0
+000000r 2               E_EDITNEW   = $CC10   ; the editor, with an empty text
+000000r 2               EN_EDITNEW  = 1
+000000r 2               E_EDIT      = $CC18   ; the editor, with the text as it was (BASIC: CALL EDIT)
+000000r 2               EN_EDIT     = 2
+000000r 2               E_TOOLKIT   = $CC88   ; the toolkit: LDA #function, JSR
+000000r 2               EN_TOOLKIT  = $10
+000000r 2               E_DESKTOP   = $CC90   ; the desktop (BASIC: CALL DESKTOP)
+000000r 2               EN_DESKTOP  = $11
+000000r 2               E_MUSIC     = $CCD0   ; the music engine: LDA #function, LDX #arg, JSR
+000000r 2               EN_MUSIC    = $19
+000000r 2               E_MUSICB    = $CCD8   ; the music engine from BASIC (mailbox $CCDE)
+000000r 2               EN_MUSICB   = $1A
+000000r 2               E_RESUME    = $CC98   ; the desktop: back from a program (G after F1)
+000000r 2               EN_RESUME   = $12
+000000r 2               E_LAUNCH    = $CCA0   ; the desktop: calls a program, then RESUME
+000000r 2               EN_LAUNCH   = $13
+000000r 2               E_TARGET    = $CCB0   ; the desktop: the program being started
+000000r 2               EN_TARGET   = $15
+000000r 2               E_BANKLD    = $CCB8   ; the desktop: disk LOAD into the launch bank
+000000r 2               EN_BANKLD   = $16
+000000r 2               ; bank map owners
+000000r 2               OWN_FREE    = 0       ; free
+000000r 2               OWN_MAIN    = $FD     ; a main-RAM program (started from the desktop)
+000000r 2               OWN_HAND    = $FE     ; loaded by hand (L ... BB in the monitor)
+000000r 2               OWN_SYSTEM  = $FF     ; reserved: zones and banks that are never handed out
+000000r 2               ; system calls in the ROM
+000000r 2               BALLOC      = $FFB0   ; A = owner, X = how many banks (next to each other), Y = 0 pr
+000000r 2               BFREE       = $FFB3   ; A = bank
+000000r 2               BFREEALL    = $FFB6   ; A = owner
+000000r 2               BCLAIM      = $FFB9   ; A = owner, X = bank
+000000r 2               VFIND       = $FFBC   ; X/Y = address of a name (low, high; up to 8 characters, endi
+000000r 2               BOWNER      = $FFBF   ; A = bank
+000000r 2               
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               SPTR     = $E6           ; 2 bytes: string being printed
+000000r 1               XAM     = $E8           ; 2 bytes: last address shown (and R address)
+000000r 1               STO     = $EA           ; 2 bytes: next address to store to
+000000r 1               VAL     = $EC           ; 2 bytes: hex number just parsed
+000000r 1               
+000000r 1               IN      = $0200         ; input line, ends with CR
+000000r 1               MAXLEN  = 126           ; longest line (one byte left for the CR)
+000000r 1               
+000000r 1               LASTC   = $0280         ; last character printed (for NEWLINE)
+000000r 1               PMODE    = $0281         ; parser mode, see below
+000000r 1               DIGITS  = $0282         ; hex digits in the number being parsed
+000000r 1               TMP     = $0283
+000000r 1               SAVA    = $0284         ; registers saved by BRK
+000000r 1               SAVX    = $0285
+000000r 1               SAVY    = $0286
+000000r 1               SAVP    = $0287
+000000r 1               NEWBANK = $0288         ; bank given to L / S
+000000r 1               HAVEBANK = $0289        ; nonzero if one was given
+000000r 1               OLDBANK = $028A         ; bank to select again afterwards
+000000r 1               VNUM    = $028B         ; V: entry number
+000000r 1               VADR    = $028C         ; V: 2 bytes, target address
+000000r 1               
+000000r 1               ; far calls
+000000r 1               FP      = $E2           ; 2 bytes: points into the far call's inline bytes
+000000r 1               FA      = $E4           ; A, X, Y kept while switching
+000000r 1               FY      = $E5
+000000r 1               FX      = $EE
+000000r 1               
+000000r 1               MODE_XAM   = 0          ; a number shows that address
+000000r 1               MODE_BLOCK = 1          ; after '.': a number shows a range
+000000r 1               MODE_STORE = 2          ; after ':': numbers are stored
+000000r 1               
+000000r 1               CR      = $0D
+000000r 1               BS      = $08
+000000r 1               ESC     = $1B
+000000r 1               BEL     = $07
+000000r 1               
+000000r 1               .macro  PRINT str               ; prints a zero-terminated string; Y is kept
+000000r 1                       lda #<str
+000000r 1                       ldx #>str
+000000r 1                       jsr puts
+000000r 1               .endmacro
+000000r 1               
+000000r 1               ;=============================================================================
+000000r 1               .segment "CODE"
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1               ; --- cold start ----------------------------------------------------------------
+000000r 1               reset:
+000000r 1  D8                   cld
+000001r 1  A2 FF                ldx #$FF
+000003r 1  9A                   txs
+000004r 1  A9 0D                lda #CR
+000006r 1  8D 80 02             sta LASTC
+000009r 1  A9 rr A2 rr          PRINT s_banner
+00000Dr 1  20 rr rr     
+000010r 1               
+000010r 1               ; boot: only at a cold start, and only if no keys are waiting
+000010r 1  AD 00 D0             lda SYSCTL              ; 1 once after power-on / $FF cold reset
+000013r 1  F0 60                beq monitor
+000015r 1  20 rr rr             jsr mapinit             ; a fresh bank map
+000018r 1  AD 11 D0             lda KBDCR               ; keys already typed in? then leave them to
+00001Br 1  30 58                bmi monitor             ; the monitor (the key stays waiting)
+00001Dr 1  A9 rr                lda #<s_bootn
+00001Fr 1  8D 46 D0             sta DNAME
+000022r 1  A9 rr                lda #>s_bootn
+000024r 1  8D 47 D0             sta DNAME+1
+000027r 1  A9 00                lda #0
+000029r 1  8D 48 D0             sta DNLEN               ; name ends with $00
+00002Cr 1  8D 44 D0             sta DEND                ; no limit
+00002Fr 1  8D 45 D0             sta DEND+1
+000032r 1  A9 01                lda #1                  ; load at the file's own address
+000034r 1  8D 40 D0             sta DCMD
+000037r 1  AD 41 D0             lda DSTAT
+00003Ar 1  F0 16                beq @booted
+00003Cr 1  C9 01                cmp #1                  ; no BOOT file: try the script BOOT.TXT
+00003Er 1  D0 0F                bne @prompt             ; (BOOT is there but would not load: prompt)
+000040r 1  A9 rr                lda #<s_boottxt
+000042r 1  8D 46 D0             sta DNAME
+000045r 1  A9 rr                lda #>s_boottxt
+000047r 1  8D 47 D0             sta DNAME+1
+00004Ar 1  A9 06                lda #6                  ; type it; nothing happens if it is not there
+00004Cr 1  8D 40 D0             sta DCMD
+00004Fr 1               @prompt:
+00004Fr 1  4C rr rr             jmp monitor
+000052r 1               @booted:
+000052r 1  AD 42 D0             lda DSTART
+000055r 1  85 E8                sta XAM
+000057r 1  AD 43 D0             lda DSTART+1
+00005Ar 1  85 E9                sta XAM+1
+00005Cr 1  A9 rr A2 rr          PRINT s_boot
+000060r 1  20 rr rr     
+000063r 1  A5 E9                lda XAM+1
+000065r 1  20 rr rr             jsr prbyte
+000068r 1  A5 E8                lda XAM
+00006Ar 1  20 rr rr             jsr prbyte
+00006Dr 1  A9 0D                lda #CR
+00006Fr 1  20 rr rr             jsr putch
+000072r 1  4C rr rr             jmp run                 ; JSR to it: an RTS comes back to the prompt
+000075r 1               
+000075r 1               ; --- main loop: prompt, read a line, run its commands ---------------------------
+000075r 1               monitor:
+000075r 1  D8                   cld
+000076r 1  A2 FF                ldx #$FF                ; fresh stack for every line
+000078r 1  9A                   txs
+000079r 1  20 rr rr             jsr newline
+00007Cr 1  A9 3E                lda #'>'
+00007Er 1  20 rr rr             jsr putch
+000081r 1  A0 00                ldy #0
+000083r 1               
+000083r 1               readkey:
+000083r 1  20 rr rr             jsr getkey
+000086r 1  C9 0D                cmp #CR
+000088r 1  F0 45                beq endline
+00008Ar 1  C9 1B                cmp #ESC
+00008Cr 1  F0 39                beq cancel
+00008Er 1  C9 08                cmp #BS
+000090r 1  F0 28                beq rubout
+000092r 1  C9 7F                cmp #$7F
+000094r 1  F0 24                beq rubout
+000096r 1  C9 20                cmp #' '
+000098r 1  90 E9                bcc readkey             ; other control keys are ignored
+00009Ar 1  C9 61                cmp #'a'
+00009Cr 1  90 06                bcc @store
+00009Er 1  C9 7B                cmp #'z'+1
+0000A0r 1  B0 02                bcs @store
+0000A2r 1  29 DF                and #$DF                ; lower case -> upper case
+0000A4r 1  C0 7E        @store: cpy #MAXLEN
+0000A6r 1  B0 0A                bcs @full
+0000A8r 1  99 00 02             sta IN,y
+0000ABr 1  C8                   iny
+0000ACr 1  20 rr rr             jsr putch
+0000AFr 1  4C rr rr             jmp readkey
+0000B2r 1  A9 07        @full:  lda #BEL                ; line full: beep, ignore the key
+0000B4r 1  20 rr rr             jsr putch
+0000B7r 1  4C rr rr             jmp readkey
+0000BAr 1               
+0000BAr 1               rubout:
+0000BAr 1  C0 00                cpy #0
+0000BCr 1  F0 C5                beq readkey
+0000BEr 1  88                   dey
+0000BFr 1  A9 08                lda #BS                 ; the terminal moves left and blanks the cell
+0000C1r 1  20 rr rr             jsr putch
+0000C4r 1  4C rr rr             jmp readkey
+0000C7r 1               
+0000C7r 1               cancel:
+0000C7r 1  A9 5C                lda #'\'
+0000C9r 1  20 rr rr             jsr putch
+0000CCr 1  4C rr rr             jmp monitor
+0000CFr 1               
+0000CFr 1               endline:
+0000CFr 1  99 00 02             sta IN,y                ; CR ends the buffer
+0000D2r 1  20 rr rr             jsr putch
+0000D5r 1               
+0000D5r 1               ; --- run the commands in the line ----------------------------------------------
+0000D5r 1  A0 00                ldy #0
+0000D7r 1  8C 81 02             sty PMODE
+0000DAr 1               parse:
+0000DAr 1  B9 00 02             lda IN,y
+0000DDr 1  C9 0D                cmp #CR
+0000DFr 1  F0 94                beq monitor
+0000E1r 1  C9 2E                cmp #'.'
+0000E3r 1  F0 66                beq @block
+0000E5r 1  C9 3A                cmp #':'
+0000E7r 1  F0 66                beq @store
+0000E9r 1  C9 52                cmp #'R'
+0000EBr 1  F0 76                beq run
+0000EDr 1  C9 3F                cmp #'?'
+0000EFr 1  F0 67                beq help
+0000F1r 1  C9 53                cmp #'S'
+0000F3r 1  D0 03                bne @nos
+0000F5r 1  4C rr rr             jmp cmd_save
+0000F8r 1  C9 4C        @nos:   cmp #'L'
+0000FAr 1  D0 03                bne @nol
+0000FCr 1  4C rr rr             jmp cmd_load
+0000FFr 1  C9 24        @nol:   cmp #'$'
+000101r 1  D0 03                bne @nod
+000103r 1  4C rr rr             jmp cmd_dir
+000106r 1  C9 54        @nod:   cmp #'T'
+000108r 1  D0 03                bne @not
+00010Ar 1  4C rr rr             jmp cmd_type
+00010Dr 1  C9 4B        @not:   cmp #'K'
+00010Fr 1  D0 03                bne @nok
+000111r 1  4C rr rr             jmp cmd_kill
+000114r 1  C9 57        @nok:   cmp #'W'
+000116r 1  D0 0E                bne @now
+000118r 1  A9 02                lda #2                  ; clear the screen, cursor home
+00011Ar 1  8D 00 D0             sta SYSCTL
+00011Dr 1  A9 0D                lda #CR                 ; the cursor is at the start of a line
+00011Fr 1  8D 80 02             sta LASTC
+000122r 1  C8                   iny
+000123r 1  4C rr rr             jmp parse
+000126r 1  C9 47        @now:   cmp #'G'
+000128r 1  D0 03                bne @nog
+00012Ar 1  4C rr rr             jmp cmd_go
+00012Dr 1  C9 56        @nog:   cmp #'V'
+00012Fr 1  D0 03                bne @nov
+000131r 1  4C rr rr             jmp cmd_vec
+000134r 1  C9 58        @nov:   cmp #'X'
+000136r 1  D0 03                bne @nox
+000138r 1  4C rr rr             jmp cmd_exit
+00013Br 1  C9 4D        @nox:   cmp #'M'
+00013Dr 1  D0 03                bne @nom
+00013Fr 1  4C rr rr             jmp cmd_map
+000142r 1  20 rr rr     @nom:   jsr gethex              ; number? (Y moves past its digits)
+000145r 1  B0 25                bcs number
+000147r 1  C8                   iny                     ; anything else separates commands
+000148r 1  4C rr rr             jmp parse
+00014Br 1  A9 01        @block: lda #MODE_BLOCK
+00014Dr 1  D0 02                bne @setmode
+00014Fr 1  A9 02        @store: lda #MODE_STORE
+000151r 1               @setmode:
+000151r 1  8D 81 02             sta PMODE
+000154r 1  C8                   iny
+000155r 1  4C rr rr             jmp parse
+000158r 1               
+000158r 1               help:
+000158r 1  C8                   iny
+000159r 1  A9 rr A2 rr          PRINT s_help
+00015Dr 1  20 rr rr     
+000160r 1  4C rr rr             jmp parse
+000163r 1               
+000163r 1               run:
+000163r 1  20 rr rr             jsr @go                 ; the program's RTS returns here
+000166r 1  4C rr rr             jmp monitor
+000169r 1  6C E8 00     @go:    jmp (XAM)
+00016Cr 1               
+00016Cr 1               number:
+00016Cr 1  AD 81 02             lda PMODE
+00016Fr 1  C9 02                cmp #MODE_STORE
+000171r 1  D0 0E                bne @notst
+000173r 1  AD 82 02             lda DIGITS              ; storing: 1-2 digits are a byte, 3-4 digits
+000176r 1  C9 03                cmp #3                  ; a new address ("D020: 05 D021: 1E" works)
+000178r 1  90 37                bcc @store
+00017Ar 1  A9 00                lda #MODE_XAM
+00017Cr 1  8D 81 02             sta PMODE
+00017Fr 1  F0 04                beq @xam
+000181r 1  C9 01        @notst: cmp #MODE_BLOCK
+000183r 1  F0 3B                beq @block
+000185r 1               
+000185r 1                       ; show one address: it becomes the last address shown and the place
+000185r 1                       ; where ':' will store
+000185r 1  A5 EC        @xam:   lda VAL
+000187r 1  85 E8                sta XAM
+000189r 1  85 EA                sta STO
+00018Br 1  A5 ED                lda VAL+1
+00018Dr 1  85 E9                sta XAM+1
+00018Fr 1  85 EB                sta STO+1
+000191r 1  20 rr rr             jsr showaddr
+000194r 1  A5 E9                lda XAM+1               ; an I/O address about to be stored to
+000196r 1  29 F0                and #$F0                ; ("D203: 41"): do not read it first, as
+000198r 1  C9 D0                cmp #$D0                ; reading can have an effect (a data port
+00019Ar 1  D0 0F                bne @show               ; moves on, KBD takes the key)
+00019Cr 1  98                   tya
+00019Dr 1  48                   pha
+00019Er 1  20 rr rr             jsr skipsp
+0001A1r 1  B9 00 02             lda IN,y
+0001A4r 1  AA                   tax
+0001A5r 1  68                   pla
+0001A6r 1  A8                   tay
+0001A7r 1  E0 3A                cpx #':'
+0001A9r 1  F0 03                beq @noshow
+0001ABr 1  20 rr rr     @show:  jsr showbyte
+0001AEr 1               @noshow:
+0001AEr 1  4C rr rr             jmp parse
+0001B1r 1               
+0001B1r 1  A5 EC        @store: lda VAL
+0001B3r 1  A2 00                ldx #0
+0001B5r 1  81 EA                sta (STO,x)
+0001B7r 1  E6 EA                inc STO
+0001B9r 1  D0 02                bne @next
+0001BBr 1  E6 EB                inc STO+1
+0001BDr 1  4C rr rr     @next:  jmp parse
+0001C0r 1               
+0001C0r 1  A5 E8        @block: lda XAM                 ; show XAM+1 .. VAL
+0001C2r 1  C5 EC                cmp VAL
+0001C4r 1  A5 E9                lda XAM+1
+0001C6r 1  E5 ED                sbc VAL+1
+0001C8r 1  B0 15                bcs @done               ; XAM >= VAL: nothing (more) to show
+0001CAr 1  E6 E8                inc XAM
+0001CCr 1  D0 02                bne @noc
+0001CEr 1  E6 E9                inc XAM+1
+0001D0r 1  A5 E8        @noc:   lda XAM
+0001D2r 1  29 07                and #$07
+0001D4r 1  D0 03                bne @byte
+0001D6r 1  20 rr rr             jsr showaddr            ; new line every 8 bytes
+0001D9r 1  20 rr rr     @byte:  jsr showbyte
+0001DCr 1  4C rr rr             jmp @block
+0001DFr 1  A9 00        @done:  lda #MODE_XAM
+0001E1r 1  8D 81 02             sta PMODE
+0001E4r 1  4C rr rr             jmp parse
+0001E7r 1               
+0001E7r 1               ; Parses hex digits at IN,Y into VAL (only the last 4 digits count).
+0001E7r 1               ; Returns carry set if there was at least one digit; Y is moved past them.
+0001E7r 1               gethex:
+0001E7r 1  A9 00                lda #0
+0001E9r 1  85 EC                sta VAL
+0001EBr 1  85 ED                sta VAL+1
+0001EDr 1  8D 82 02             sta DIGITS
+0001F0r 1  B9 00 02     @loop:  lda IN,y
+0001F3r 1  C9 30                cmp #'0'
+0001F5r 1  90 2D                bcc @end
+0001F7r 1  C9 3A                cmp #'9'+1
+0001F9r 1  90 0D                bcc @dec
+0001FBr 1  C9 41                cmp #'A'
+0001FDr 1  90 25                bcc @end
+0001FFr 1  C9 47                cmp #'F'+1
+000201r 1  B0 21                bcs @end
+000203r 1  E9 36                sbc #'A'-11             ; carry is clear: A - ('A'-11) - 1 = 10..15
+000205r 1  4C rr rr             jmp @digit
+000208r 1  29 0F        @dec:   and #$0F
+00020Ar 1  8D 83 02     @digit: sta TMP
+00020Dr 1  A2 04                ldx #4
+00020Fr 1  06 EC        @shift: asl VAL
+000211r 1  26 ED                rol VAL+1
+000213r 1  CA                   dex
+000214r 1  D0 F9                bne @shift
+000216r 1  A5 EC                lda VAL
+000218r 1  0D 83 02             ora TMP
+00021Br 1  85 EC                sta VAL
+00021Dr 1  EE 82 02             inc DIGITS
+000220r 1  C8                   iny
+000221r 1  4C rr rr             jmp @loop
+000224r 1  AD 82 02     @end:   lda DIGITS
+000227r 1  C9 01                cmp #1                  ; carry set if DIGITS >= 1
+000229r 1  60                   rts
+00022Ar 1               
+00022Ar 1               ; --- disk ----------------------------------------------------------------------
+00022Ar 1               
+00022Ar 1               ; S NAME HHHH.HHHH
+00022Ar 1               cmd_save:
+00022Ar 1  C8                   iny
+00022Br 1  20 rr rr             jsr getname
+00022Er 1  90 46                bcc @bad
+000230r 1  20 rr rr             jsr skipsp
+000233r 1  20 rr rr             jsr gethex
+000236r 1  90 3E                bcc @bad
+000238r 1  A5 EC                lda VAL
+00023Ar 1  8D 42 D0             sta DSTART
+00023Dr 1  A5 ED                lda VAL+1
+00023Fr 1  8D 43 D0             sta DSTART+1
+000242r 1  B9 00 02             lda IN,y
+000245r 1  C9 2E                cmp #'.'
+000247r 1  D0 2D                bne @bad
+000249r 1  C8                   iny
+00024Ar 1  20 rr rr             jsr gethex
+00024Dr 1  90 27                bcc @bad
+00024Fr 1  18                   clc                     ; end + 1 ($FFFF + 1 = 0 means "up to $FFFF")
+000250r 1  A5 EC                lda VAL
+000252r 1  69 01                adc #1
+000254r 1  8D 44 D0             sta DEND
+000257r 1  A5 ED                lda VAL+1
+000259r 1  69 00                adc #0
+00025Br 1  8D 45 D0             sta DEND+1
+00025Er 1  20 rr rr             jsr getbank             ; optional bank
+000261r 1  A9 02                lda #2
+000263r 1  20 rr rr             jsr diskbank            ; run the command with that bank selected
+000266r 1  20 rr rr             jsr dcheck              ; back to the prompt with a message on error
+000269r 1  20 rr rr             jsr newline
+00026Cr 1  A9 rr A2 rr          PRINT s_saved
+000270r 1  20 rr rr     
+000273r 1  4C rr rr             jmp showrange
+000276r 1  4C rr rr     @bad:   jmp usage
+000279r 1               
+000279r 1               ; L NAME [HHHH]
+000279r 1               cmd_load:
+000279r 1  C8                   iny
+00027Ar 1  20 rr rr             jsr getname
+00027Dr 1  90 57                bcc @bad
+00027Fr 1  20 rr rr             jsr skipsp
+000282r 1  A9 00                lda #0
+000284r 1  8D 44 D0             sta DEND                ; no limit
+000287r 1  8D 45 D0             sta DEND+1
+00028Ar 1  20 rr rr             jsr gethex
+00028Dr 1  90 11                bcc @own
+00028Fr 1  A5 EC                lda VAL
+000291r 1  8D 42 D0             sta DSTART
+000294r 1  A5 ED                lda VAL+1
+000296r 1  8D 43 D0             sta DSTART+1
+000299r 1  20 rr rr             jsr getbank             ; optional bank (only after an address)
+00029Cr 1  A9 03                lda #3                  ; load at HHHH
+00029Er 1  D0 07                bne @go
+0002A0r 1  A9 00        @own:   lda #0
+0002A2r 1  8D 89 02             sta HAVEBANK
+0002A5r 1  A9 01                lda #1                  ; load at the file's own address
+0002A7r 1  20 rr rr     @go:    jsr diskbank            ; run the command with that bank selected
+0002AAr 1  20 rr rr             jsr dcheck              ; back to the prompt with a message on error
+0002ADr 1  AD 89 02             lda HAVEBANK            ; loaded into a free bank: it is taken now
+0002B0r 1  F0 0D                beq @nomark
+0002B2r 1  AE 88 02             ldx NEWBANK
+0002B5r 1  BD 00 CF             lda BANKMAP,x
+0002B8r 1  D0 05                bne @nomark
+0002BAr 1  A9 FE                lda #OWN_HAND
+0002BCr 1  9D 00 CF             sta BANKMAP,x
+0002BFr 1               @nomark:
+0002BFr 1  AD 42 D0             lda DSTART              ; R will run what was loaded
+0002C2r 1  85 E8                sta XAM
+0002C4r 1  AD 43 D0             lda DSTART+1
+0002C7r 1  85 E9                sta XAM+1
+0002C9r 1  20 rr rr             jsr newline
+0002CCr 1  A9 rr A2 rr          PRINT s_loaded
+0002D0r 1  20 rr rr     
+0002D3r 1  4C rr rr             jmp showrange
+0002D6r 1  4C rr rr     @bad:   jmp usage
+0002D9r 1               
+0002D9r 1               ; T NAME: the host types the file into the keyboard queue
+0002D9r 1               cmd_type:
+0002D9r 1  C8                   iny
+0002DAr 1  20 rr rr             jsr getname
+0002DDr 1  90 0B                bcc @bad
+0002DFr 1  A9 06                lda #6
+0002E1r 1  8D 40 D0             sta DCMD
+0002E4r 1  20 rr rr             jsr dcheck              ; back to the prompt with a message on error
+0002E7r 1  4C rr rr             jmp monitor             ; the prompt then reads the typed lines
+0002EAr 1  4C rr rr     @bad:   jmp usage
+0002EDr 1               
+0002EDr 1               ; K NAME
+0002EDr 1               cmd_kill:
+0002EDr 1  C8                   iny
+0002EEr 1  20 rr rr             jsr getname
+0002F1r 1  90 15                bcc @bad
+0002F3r 1  A9 05                lda #5
+0002F5r 1  8D 40 D0             sta DCMD
+0002F8r 1  20 rr rr             jsr dcheck              ; back to the prompt with a message on error
+0002FBr 1  20 rr rr             jsr newline
+0002FEr 1  A9 rr A2 rr          PRINT s_deleted
+000302r 1  20 rr rr     
+000305r 1  4C rr rr             jmp monitor
+000308r 1  4C rr rr     @bad:   jmp usage
+00030Br 1               
+00030Br 1               ; $
+00030Br 1               cmd_dir:
+00030Br 1  A9 04                lda #4
+00030Dr 1  8D 40 D0             sta DCMD
+000310r 1  A9 0D                lda #CR                 ; the host printed the list and ended its line
+000312r 1  8D 80 02             sta LASTC
+000315r 1  20 rr rr             jsr dcheck              ; back to the prompt with a message on error
+000318r 1  4C rr rr             jmp monitor
+00031Br 1               
+00031Br 1               ; G: back to the program that set WARMLO/WARMHI
+00031Br 1               cmd_go:
+00031Br 1  AD 02 D0             lda WARMLO
+00031Er 1  85 E8                sta XAM
+000320r 1  AD 03 D0             lda WARMHI
+000323r 1  85 E9                sta XAM+1
+000325r 1  05 E8                ora XAM
+000327r 1  D0 0D                bne @go
+000329r 1  20 rr rr             jsr newline
+00032Cr 1  A9 rr A2 rr          PRINT s_nowarm
+000330r 1  20 rr rr     
+000333r 1  4C rr rr             jmp monitor
+000336r 1  4C rr rr     @go:    jmp run                 ; as R: an RTS comes back to the prompt
+000339r 1               
+000339r 1               ; X: quit the emulator (it stops at the end of the current frame)
+000339r 1               cmd_exit:
+000339r 1  20 rr rr             jsr newline
+00033Cr 1  A9 rr A2 rr          PRINT s_bye
+000340r 1  20 rr rr     
+000343r 1  A9 01                lda #1
+000345r 1  8D 00 D0             sta SYSCTL
+000348r 1  4C rr rr     @wait:  jmp @wait
+00034Br 1               
+00034Br 1               ; Reads an optional bank number after a space: HAVEBANK/NEWBANK
+00034Br 1               getbank:
+00034Br 1  A9 00                lda #0
+00034Dr 1  8D 89 02             sta HAVEBANK
+000350r 1  20 rr rr             jsr skipsp
+000353r 1  20 rr rr             jsr gethex
+000356r 1  90 0A                bcc @none
+000358r 1  A5 EC                lda VAL
+00035Ar 1  8D 88 02             sta NEWBANK
+00035Dr 1  A9 01                lda #1
+00035Fr 1  8D 89 02             sta HAVEBANK
+000362r 1  60           @none:  rts
+000363r 1               
+000363r 1               ; Writes the disk command in A, with NEWBANK selected if HAVEBANK; the bank
+000363r 1               ; selected before is selected again afterwards, whatever the result
+000363r 1               diskbank:
+000363r 1  48                   pha
+000364r 1  AD 20 D0             lda BANK
+000367r 1  8D 8A 02             sta OLDBANK
+00036Ar 1  AD 89 02             lda HAVEBANK
+00036Dr 1  F0 06                beq @cmd
+00036Fr 1  AD 88 02             lda NEWBANK
+000372r 1  8D 20 D0             sta BANK
+000375r 1  68           @cmd:   pla
+000376r 1  8D 40 D0             sta DCMD
+000379r 1  AD 8A 02             lda OLDBANK
+00037Cr 1  8D 20 D0             sta BANK
+00037Fr 1  60                   rts
+000380r 1               
+000380r 1               ; V                 list the vector table
+000380r 1               ; V NN BB HHHH      set entry NN to call HHHH in bank BB
+000380r 1               cmd_vec:
+000380r 1  C8                   iny
+000381r 1  20 rr rr             jsr skipsp
+000384r 1  20 rr rr             jsr gethex
+000387r 1  B0 03                bcs @set
+000389r 1  4C rr rr             jmp vlist
+00038Cr 1  A5 EC        @set:   lda VAL                 ; entry number
+00038Er 1  C9 28                cmp #VTMAX
+000390r 1  90 03                bcc *+5
+000392r 1  4C rr rr             jmp @bad
+000395r 1  8D 8B 02             sta VNUM
+000398r 1  20 rr rr             jsr skipsp
+00039Br 1  20 rr rr             jsr gethex
+00039Er 1  B0 03                bcs *+5
+0003A0r 1  4C rr rr             jmp @bad
+0003A3r 1  A5 EC                lda VAL
+0003A5r 1  48                   pha                     ; bank
+0003A6r 1  20 rr rr             jsr skipsp
+0003A9r 1  20 rr rr             jsr gethex
+0003ACr 1  B0 03                bcs *+5
+0003AEr 1  4C rr rr             jmp @badp
+0003B1r 1  A5 EC                lda VAL
+0003B3r 1  8D 8C 02             sta VADR
+0003B6r 1  A5 ED                lda VAL+1
+0003B8r 1  8D 8D 02             sta VADR+1
+0003BBr 1  8C 83 02             sty TMP                 ; where the name (if any) starts
+0003BEr 1  20 rr rr             jsr vinit               ; make sure the table has its header
+0003C1r 1  AD 8B 02             lda VNUM
+0003C4r 1  20 rr rr             jsr ventry              ; VAL = entry address
+0003C7r 1  A0 00                ldy #0
+0003C9r 1  A9 20                lda #$20                ; JSR $FFD0
+0003CBr 1  91 EC                sta (VAL),y
+0003CDr 1  C8                   iny
+0003CEr 1  A9 rr                lda #<farcall_entry
+0003D0r 1  91 EC                sta (VAL),y
+0003D2r 1  C8                   iny
+0003D3r 1  A9 rr                lda #>farcall_entry
+0003D5r 1  91 EC                sta (VAL),y
+0003D7r 1  C8                   iny
+0003D8r 1  68                   pla                     ; bank
+0003D9r 1  91 EC                sta (VAL),y
+0003DBr 1  C8                   iny
+0003DCr 1  AD 8C 02             lda VADR
+0003DFr 1  91 EC                sta (VAL),y
+0003E1r 1  C8                   iny
+0003E2r 1  AD 8D 02             lda VADR+1
+0003E5r 1  91 EC                sta (VAL),y
+0003E7r 1  C8                   iny
+0003E8r 1  A9 00                lda #0
+0003EAr 1  91 EC                sta (VAL),y
+0003ECr 1  C8                   iny
+0003EDr 1  91 EC                sta (VAL),y
+0003EFr 1  AD 8B 02             lda VNUM                ; the name: up to 8 characters, 0 after
+0003F2r 1  20 rr rr             jsr vnaddr
+0003F5r 1  AE 83 02             ldx TMP
+0003F8r 1  BD 00 02     @sk:    lda IN,x
+0003FBr 1  C9 20                cmp #' '
+0003FDr 1  D0 03                bne @nm
+0003FFr 1  E8                   inx
+000400r 1  D0 F6                bne @sk
+000402r 1  A0 00        @nm:    ldy #0
+000404r 1  BD 00 02     @nc:    lda IN,x
+000407r 1  C9 21                cmp #' '+1              ; a space or the CR ends it
+000409r 1  90 0A                bcc @pad
+00040Br 1  91 EC                sta (VAL),y
+00040Dr 1  E8                   inx
+00040Er 1  C8                   iny
+00040Fr 1  C0 08                cpy #8
+000411r 1  D0 F1                bne @nc
+000413r 1  F0 09                beq @named
+000415r 1  A9 00        @pad:   lda #0
+000417r 1  91 EC        @pd:    sta (VAL),y
+000419r 1  C8                   iny
+00041Ar 1  C0 08                cpy #8
+00041Cr 1  D0 F9                bne @pd
+00041Er 1  AE 8B 02     @named: ldx VNUM                ; count = max(count, NN+1)
+000421r 1  E8                   inx
+000422r 1  EC 02 CC             cpx VTCOUNT
+000425r 1  90 03                bcc @shown
+000427r 1  8E 02 CC             stx VTCOUNT
+00042Ar 1  AD 8B 02     @shown: lda VNUM
+00042Dr 1  20 rr rr             jsr vshow
+000430r 1  4C rr rr             jmp monitor
+000433r 1  68           @badp:  pla
+000434r 1  20 rr rr     @bad:   jsr newline
+000437r 1  A9 rr A2 rr          PRINT s_vuse
+00043Br 1  20 rr rr     
+00043Er 1  4C rr rr             jmp monitor
+000441r 1               
+000441r 1               ; Lists the entries in use
+000441r 1               vlist:
+000441r 1  20 rr rr             jsr vvalid
+000444r 1  D0 14                bne @none
+000446r 1  A2 00                ldx #0
+000448r 1  EC 02 CC     @loop:  cpx VTCOUNT
+00044Br 1  B0 0A                bcs @done
+00044Dr 1  8A                   txa
+00044Er 1  48                   pha
+00044Fr 1  20 rr rr             jsr vshow
+000452r 1  68                   pla
+000453r 1  AA                   tax
+000454r 1  E8                   inx
+000455r 1  D0 F1                bne @loop
+000457r 1  4C rr rr     @done:  jmp monitor
+00045Ar 1  20 rr rr     @none:  jsr newline
+00045Dr 1  A9 rr A2 rr          PRINT s_vnone
+000461r 1  20 rr rr     
+000464r 1  4C rr rr             jmp monitor
+000467r 1               
+000467r 1               ; Shows entry A: "NN CCxx: bank BB HHHH" (or "unused")
+000467r 1               vshow:
+000467r 1  8D 8B 02             sta VNUM
+00046Ar 1  20 rr rr             jsr @one
+00046Dr 1  AD 8B 02             lda VNUM                ; then its name, if it has one
+000470r 1  20 rr rr             jsr vnaddr
+000473r 1  A0 00                ldy #0
+000475r 1  B1 EC                lda (VAL),y
+000477r 1  F0 11                beq @nn
+000479r 1  A9 20                lda #' '
+00047Br 1  20 rr rr             jsr putch
+00047Er 1  B1 EC        @ch:    lda (VAL),y
+000480r 1  F0 08                beq @nn
+000482r 1  20 rr rr             jsr putch
+000485r 1  C8                   iny
+000486r 1  C0 08                cpy #8
+000488r 1  D0 F4                bne @ch
+00048Ar 1  60           @nn:    rts
+00048Br 1  48           @one:   pha
+00048Cr 1  20 rr rr             jsr newline
+00048Fr 1  68                   pla
+000490r 1  48                   pha
+000491r 1  20 rr rr             jsr prbyte
+000494r 1  A9 20                lda #' '
+000496r 1  20 rr rr             jsr putch
+000499r 1  68                   pla
+00049Ar 1  20 rr rr             jsr ventry
+00049Dr 1  A5 ED                lda VAL+1
+00049Fr 1  20 rr rr             jsr prbyte
+0004A2r 1  A5 EC                lda VAL
+0004A4r 1  20 rr rr             jsr prbyte
+0004A7r 1  A9 rr A2 rr          PRINT s_vbank
+0004ABr 1  20 rr rr     
+0004AEr 1  A0 00                ldy #0
+0004B0r 1  B1 EC                lda (VAL),y
+0004B2r 1  C9 20                cmp #$20                ; a far-call stub?
+0004B4r 1  D0 19                bne @unused
+0004B6r 1  A0 03                ldy #3
+0004B8r 1  B1 EC                lda (VAL),y
+0004BAr 1  20 rr rr             jsr prbyte
+0004BDr 1  A9 20                lda #' '
+0004BFr 1  20 rr rr             jsr putch
+0004C2r 1  A0 05                ldy #5
+0004C4r 1  B1 EC                lda (VAL),y
+0004C6r 1  20 rr rr             jsr prbyte
+0004C9r 1  88                   dey
+0004CAr 1  B1 EC                lda (VAL),y
+0004CCr 1  4C rr rr             jmp prbyte
+0004CFr 1               @unused:
+0004CFr 1  A9 rr A2 rr          PRINT s_vunused
+0004D3r 1  20 rr rr     
+0004D6r 1  60                   rts
+0004D7r 1               
+0004D7r 1               ; VAL = address of entry A's name (VTNAMES + 8*A)
+0004D7r 1  20 rr rr     vnaddr: jsr ventry
+0004DAr 1  18                   clc
+0004DBr 1  A5 EC                lda VAL
+0004DDr 1  69 40                adc #<(VTNAMES - VTENTRY)
+0004DFr 1  85 EC                sta VAL
+0004E1r 1  A5 ED                lda VAL+1
+0004E3r 1  69 01                adc #>(VTNAMES - VTENTRY)
+0004E5r 1  85 ED                sta VAL+1
+0004E7r 1  60                   rts
+0004E8r 1               
+0004E8r 1               ; VAL = address of entry A (VTENTRY + 8*A)
+0004E8r 1               ventry:
+0004E8r 1  85 EC                sta VAL
+0004EAr 1  A9 00                lda #0
+0004ECr 1  85 ED                sta VAL+1
+0004EEr 1  06 EC                asl VAL
+0004F0r 1  26 ED                rol VAL+1
+0004F2r 1  06 EC                asl VAL
+0004F4r 1  26 ED                rol VAL+1
+0004F6r 1  06 EC                asl VAL
+0004F8r 1  26 ED                rol VAL+1
+0004FAr 1  18                   clc
+0004FBr 1  A5 EC                lda VAL
+0004FDr 1  69 08                adc #<VTENTRY
+0004FFr 1  85 EC                sta VAL
+000501r 1  A5 ED                lda VAL+1
+000503r 1  69 CC                adc #>VTENTRY
+000505r 1  85 ED                sta VAL+1
+000507r 1  60                   rts
+000508r 1               
+000508r 1               ; Z set if the table has its "VT" signature
+000508r 1               vvalid:
+000508r 1  AD 00 CC             lda VTAB
+00050Br 1  C9 56                cmp #'V'
+00050Dr 1  D0 05                bne @no
+00050Fr 1  AD 01 CC             lda VTAB+1
+000512r 1  C9 54                cmp #'T'
+000514r 1  60           @no:    rts
+000515r 1               
+000515r 1               ; Writes the header (empty table) unless it is there already
+000515r 1               vinit:
+000515r 1  20 rr rr             jsr vvalid
+000518r 1  F0 0F                beq @ok
+00051Ar 1  A9 56                lda #'V'
+00051Cr 1  8D 00 CC             sta VTAB
+00051Fr 1  A9 54                lda #'T'
+000521r 1  8D 01 CC             sta VTAB+1
+000524r 1  A9 00                lda #0
+000526r 1  8D 02 CC             sta VTCOUNT
+000529r 1  60           @ok:    rts
+00052Ar 1               
+00052Ar 1               ; --- the bank map --------------------------------------------------------------
+00052Ar 1               
+00052Ar 1               ; Cold start: zones $00-$1F and $C0-$FF reserved, programs and documents free
+00052Ar 1               mapinit:
+00052Ar 1  A2 00                ldx #0
+00052Cr 1  A9 FF        @l:     lda #OWN_SYSTEM
+00052Er 1  E0 20                cpx #Z_PROGRAMS
+000530r 1  90 06                bcc @s
+000532r 1  E0 C0                cpx #Z_SWAP
+000534r 1  B0 02                bcs @s
+000536r 1  A9 00                lda #OWN_FREE
+000538r 1  9D 00 CF     @s:     sta BANKMAP,x
+00053Br 1  E8                   inx
+00053Cr 1  D0 EE                bne @l
+00053Er 1  60                   rts
+00053Fr 1               
+00053Fr 1               ; M          list the map, one line per run of banks with the same owner
+00053Fr 1               ; M BB OO    set bank BB's owner, then list
+00053Fr 1               cmd_map:
+00053Fr 1  C8                   iny
+000540r 1  20 rr rr             jsr skipsp
+000543r 1  20 rr rr             jsr gethex
+000546r 1  90 22                bcc mlist
+000548r 1  A5 EC                lda VAL
+00054Ar 1  48                   pha
+00054Br 1  20 rr rr             jsr skipsp
+00054Er 1  20 rr rr             jsr gethex
+000551r 1  68                   pla
+000552r 1  90 09                bcc @bad
+000554r 1  AA                   tax
+000555r 1  A5 EC                lda VAL
+000557r 1  9D 00 CF             sta BANKMAP,x
+00055Ar 1  4C rr rr             jmp mlist
+00055Dr 1  20 rr rr     @bad:   jsr newline
+000560r 1  A9 rr A2 rr          PRINT s_muse
+000564r 1  20 rr rr     
+000567r 1  4C rr rr             jmp monitor
+00056Ar 1  A2 00        mlist:  ldx #0
+00056Cr 1  8E 8C 02     @run:   stx VADR                ; first bank of the run
+00056Fr 1  BD 00 CF             lda BANKMAP,x
+000572r 1  8D 8B 02             sta VNUM                ; its owner
+000575r 1  E0 FF        @more:  cpx #$FF
+000577r 1  F0 0B                beq @end
+000579r 1  BD 01 CF             lda BANKMAP+1,x
+00057Cr 1  CD 8B 02             cmp VNUM
+00057Fr 1  D0 03                bne @end
+000581r 1  E8                   inx
+000582r 1  D0 F1                bne @more
+000584r 1  8E 8D 02     @end:   stx VADR+1              ; last bank of the run
+000587r 1  20 rr rr             jsr newline
+00058Ar 1  AD 8C 02             lda VADR
+00058Dr 1  20 rr rr             jsr prbyte
+000590r 1  AD 8D 02             lda VADR+1
+000593r 1  CD 8C 02             cmp VADR
+000596r 1  F0 0E                beq @one
+000598r 1  A9 2D                lda #'-'
+00059Ar 1  20 rr rr             jsr putch
+00059Dr 1  AD 8D 02             lda VADR+1
+0005A0r 1  20 rr rr             jsr prbyte
+0005A3r 1  4C rr rr             jmp @own
+0005A6r 1  A9 rr A2 rr  @one:   PRINT s_3sp
+0005AAr 1  20 rr rr     
+0005ADr 1  A9 rr A2 rr  @own:   PRINT s_2sp
+0005B1r 1  20 rr rr     
+0005B4r 1  AD 8B 02             lda VNUM
+0005B7r 1  D0 0A                bne @n0
+0005B9r 1  A9 rr A2 rr          PRINT s_ofree
+0005BDr 1  20 rr rr     
+0005C0r 1  4C rr rr             jmp @next
+0005C3r 1  C9 FF        @n0:    cmp #OWN_SYSTEM
+0005C5r 1  D0 0A                bne @n1
+0005C7r 1  A9 rr A2 rr          PRINT s_osys
+0005CBr 1  20 rr rr     
+0005CEr 1  4C rr rr             jmp @next
+0005D1r 1  C9 FE        @n1:    cmp #OWN_HAND
+0005D3r 1  D0 0A                bne @n2
+0005D5r 1  A9 rr A2 rr          PRINT s_ohand
+0005D9r 1  20 rr rr     
+0005DCr 1  4C rr rr             jmp @next
+0005DFr 1  C9 FD        @n2:    cmp #OWN_MAIN
+0005E1r 1  D0 0A                bne @n3
+0005E3r 1  A9 rr A2 rr          PRINT s_omain
+0005E7r 1  20 rr rr     
+0005EAr 1  4C rr rr             jmp @next
+0005EDr 1  A9 rr A2 rr  @n3:    PRINT s_obank
+0005F1r 1  20 rr rr     
+0005F4r 1  AD 8B 02             lda VNUM
+0005F7r 1  20 rr rr             jsr prbyte
+0005FAr 1  AE 8D 02     @next:  ldx VADR+1
+0005FDr 1  E0 FF                cpx #$FF
+0005FFr 1  F0 04                beq @done
+000601r 1  E8                   inx
+000602r 1  4C rr rr             jmp @run
+000605r 1  4C rr rr     @done:  jmp monitor
+000608r 1               
+000608r 1               ; --- system calls (through the jump table at $FFB0) ------------------------------
+000608r 1               SCOWN   = $CE88                 ; their variables, in the system page
+000608r 1               SCCNT   = $CE89
+000608r 1               SCEND   = $CE8A
+000608r 1               SCFIRST = $CE8B
+000608r 1               SCN     = $CE8C
+000608r 1               
+000608r 1               ; A = owner, X = count, Y = zone (0 programs, 1 documents): A = first bank
+000608r 1  8D 88 CE     balloc: sta SCOWN
+00060Br 1  8E 89 CE             stx SCCNT
+00060Er 1  C9 00                cmp #OWN_FREE           ; (an owner, and at least one bank)
+000610r 1  F0 40                beq @fail
+000612r 1  E0 00                cpx #0
+000614r 1  F0 3C                beq @fail
+000616r 1  A2 20                ldx #Z_PROGRAMS
+000618r 1  A9 80                lda #Z_PROGRAMS_END + 1
+00061Ar 1  C0 00                cpy #0
+00061Cr 1  F0 04                beq @z
+00061Er 1  A2 80                ldx #Z_DOCUMENTS
+000620r 1  A9 C0                lda #Z_DOCUMENTS_END + 1
+000622r 1  8D 8A CE     @z:     sta SCEND
+000625r 1  8E 8B CE     @try:   stx SCFIRST             ; a run of SCCNT free banks from here?
+000628r 1  AC 89 CE             ldy SCCNT
+00062Br 1  EC 8A CE     @chk:   cpx SCEND
+00062Er 1  B0 22                bcs @fail
+000630r 1  BD 00 CF             lda BANKMAP,x
+000633r 1  D0 19                bne @next
+000635r 1  E8                   inx
+000636r 1  88                   dey
+000637r 1  D0 F2                bne @chk
+000639r 1  AE 8B CE             ldx SCFIRST             ; yes: they are the owner's
+00063Cr 1  AC 89 CE             ldy SCCNT
+00063Fr 1  AD 88 CE             lda SCOWN
+000642r 1  9D 00 CF     @mk:    sta BANKMAP,x
+000645r 1  E8                   inx
+000646r 1  88                   dey
+000647r 1  D0 F9                bne @mk
+000649r 1  AD 8B CE             lda SCFIRST
+00064Cr 1  18                   clc
+00064Dr 1  60                   rts
+00064Er 1  E8           @next:  inx                     ; a used bank: try after it
+00064Fr 1  4C rr rr             jmp @try
+000652r 1  38           @fail:  sec
+000653r 1  60                   rts
+000654r 1               
+000654r 1               ; A = bank: free (not a system bank)
+000654r 1  AA           bfree:  tax
+000655r 1  BD 00 CF             lda BANKMAP,x
+000658r 1  C9 FF                cmp #OWN_SYSTEM
+00065Ar 1  F0 07                beq @no
+00065Cr 1  A9 00                lda #OWN_FREE
+00065Er 1  9D 00 CF             sta BANKMAP,x
+000661r 1  18                   clc
+000662r 1  60                   rts
+000663r 1  38           @no:    sec
+000664r 1  60                   rts
+000665r 1               
+000665r 1               ; A = owner: all its banks free
+000665r 1               bfreeall:
+000665r 1  C9 00                cmp #OWN_FREE
+000667r 1  F0 19                beq @r
+000669r 1  C9 FF                cmp #OWN_SYSTEM
+00066Br 1  F0 15                beq @r
+00066Dr 1  8D 88 CE             sta SCOWN
+000670r 1  A2 00                ldx #0
+000672r 1  BD 00 CF     @l:     lda BANKMAP,x
+000675r 1  CD 88 CE             cmp SCOWN
+000678r 1  D0 05                bne @n
+00067Ar 1  A9 00                lda #OWN_FREE
+00067Cr 1  9D 00 CF             sta BANKMAP,x
+00067Fr 1  E8           @n:     inx
+000680r 1  D0 F0                bne @l
+000682r 1  18           @r:     clc
+000683r 1  60                   rts
+000684r 1               
+000684r 1               ; A = owner, X = bank: the owner's, unless someone else has it (carry set)
+000684r 1  8D 88 CE     bclaim: sta SCOWN
+000687r 1  BD 00 CF             lda BANKMAP,x
+00068Ar 1  F0 07                beq @take
+00068Cr 1  CD 88 CE             cmp SCOWN
+00068Fr 1  F0 02                beq @take
+000691r 1  38                   sec
+000692r 1  60                   rts
+000693r 1  AD 88 CE     @take:  lda SCOWN
+000696r 1  9D 00 CF             sta BANKMAP,x
+000699r 1  18                   clc
+00069Ar 1  60                   rts
+00069Br 1               
+00069Br 1               ; A = bank: A = its owner
+00069Br 1  AA           bowner: tax
+00069Cr 1  BD 00 CF             lda BANKMAP,x
+00069Fr 1  18                   clc
+0006A0r 1  60                   rts
+0006A1r 1               
+0006A1r 1               ; X/Y = a name: A = its far-call entry, X/Y = the entry's address
+0006A1r 1  A5 E6        vfind:  lda SPTR                ; (the monitor's pointer, put back after)
+0006A3r 1  48                   pha
+0006A4r 1  A5 E7                lda SPTR+1
+0006A6r 1  48                   pha
+0006A7r 1  86 E6                stx SPTR
+0006A9r 1  84 E7                sty SPTR+1
+0006ABr 1  A0 00                ldy #0                  ; an empty name finds nothing
+0006ADr 1  B1 E6                lda (SPTR),y
+0006AFr 1  C9 21                cmp #' '+1
+0006B1r 1  B0 03                bcs *+5
+0006B3r 1  4C rr rr             jmp @fail
+0006B6r 1  A9 00                lda #0
+0006B8r 1  8D 8C CE             sta SCN
+0006BBr 1  AD 8C CE     @ent:   lda SCN                 ; X = the name's offset in its 256-byte half
+0006BEr 1  0A                   asl
+0006BFr 1  0A                   asl
+0006C0r 1  0A                   asl
+0006C1r 1  AA                   tax
+0006C2r 1  A9 00                lda #0
+0006C4r 1  8D 8A CE             sta SCEND               ; 1 once the name has ended
+0006C7r 1  A8                   tay
+0006C8r 1  AD 8A CE     @ch:    lda SCEND
+0006CBr 1  D0 15                bne @zero
+0006CDr 1  B1 E6                lda (SPTR),y
+0006CFr 1  C9 61                cmp #'a'
+0006D1r 1  90 06                bcc @up
+0006D3r 1  C9 7B                cmp #'z'+1
+0006D5r 1  B0 02                bcs @up
+0006D7r 1  29 DF                and #$DF
+0006D9r 1  C9 21        @up:    cmp #' '+1
+0006DBr 1  B0 07                bcs @have
+0006DDr 1  A9 01                lda #1
+0006DFr 1  8D 8A CE             sta SCEND
+0006E2r 1  A9 00        @zero:  lda #0
+0006E4r 1  8D 89 CE     @have:  sta SCCNT
+0006E7r 1  AD 8C CE             lda SCN
+0006EAr 1  C9 20                cmp #32
+0006ECr 1  B0 06                bcs @hi
+0006EEr 1  BD 48 CD             lda VTNAMES,x
+0006F1r 1  4C rr rr             jmp @cmp
+0006F4r 1  BD 48 CE     @hi:    lda VTNAMES+256,x
+0006F7r 1  CD 89 CE     @cmp:   cmp SCCNT
+0006FAr 1  D0 3F                bne @miss
+0006FCr 1  E8                   inx
+0006FDr 1  C8                   iny
+0006FEr 1  C0 08                cpy #8
+000700r 1  D0 C6                bne @ch
+000702r 1  AD 8C CE             lda SCN                 ; found: X/Y = VTENTRY + 8 * entry
+000705r 1  8D 8B CE             sta SCFIRST
+000708r 1  A9 00                lda #0
+00070Ar 1  8D 89 CE             sta SCCNT
+00070Dr 1  AD 8C CE             lda SCN
+000710r 1  0A                   asl
+000711r 1  2E 89 CE             rol SCCNT
+000714r 1  0A                   asl
+000715r 1  2E 89 CE             rol SCCNT
+000718r 1  0A                   asl
+000719r 1  2E 89 CE             rol SCCNT
+00071Cr 1  18                   clc
+00071Dr 1  69 08                adc #<VTENTRY
+00071Fr 1  8D 88 CE             sta SCOWN
+000722r 1  AD 89 CE             lda SCCNT
+000725r 1  69 CC                adc #>VTENTRY
+000727r 1  8D 89 CE             sta SCCNT
+00072Ar 1  68                   pla
+00072Br 1  85 E7                sta SPTR+1
+00072Dr 1  68                   pla
+00072Er 1  85 E6                sta SPTR
+000730r 1  AE 88 CE             ldx SCOWN
+000733r 1  AC 89 CE             ldy SCCNT
+000736r 1  AD 8B CE             lda SCFIRST
+000739r 1  18                   clc
+00073Ar 1  60                   rts
+00073Br 1  EE 8C CE     @miss:  inc SCN
+00073Er 1  AD 8C CE             lda SCN
+000741r 1  C9 28                cmp #VTMAX
+000743r 1  B0 03                bcs *+5
+000745r 1  4C rr rr             jmp @ent
+000748r 1  68           @fail:  pla
+000749r 1  85 E7                sta SPTR+1
+00074Br 1  68                   pla
+00074Cr 1  85 E6                sta SPTR
+00074Er 1  38                   sec
+00074Fr 1  60                   rts
+000750r 1               
+000750r 1               ; --- far call --------------------------------------------------------------------
+000750r 1               
+000750r 1               ; JSR farcall / .byte bank / .word address  (entered through $FFD0)
+000750r 1               ; Switches to the bank, calls the address with A, X, Y as they were, then
+000750r 1               ; switches back to the caller's bank and returns after the 3 inline bytes'
+000750r 1               ; owner (a vector table entry returns straight to whoever called the entry).
+000750r 1               farcall:
+000750r 1  85 E4                sta FA
+000752r 1  86 EE                stx FX
+000754r 1  84 E5                sty FY
+000756r 1  68                   pla                     ; return address = last byte of the JSR
+000757r 1  85 E2                sta FP
+000759r 1  68                   pla
+00075Ar 1  85 E3                sta FP+1
+00075Cr 1  AD 20 D0             lda BANK                ; the caller's bank, for farret
+00075Fr 1  48                   pha
+000760r 1  A9 rr                lda #>(farret-1)        ; the callee's RTS goes to farret
+000762r 1  48                   pha
+000763r 1  A9 rr                lda #<(farret-1)
+000765r 1  48                   pha
+000766r 1  A0 03                ldy #3                  ; (the inline bytes are read before the
+000768r 1  B1 E2                lda (FP),y              ; switch: they may be in the banked RAM)
+00076Ar 1  AA                   tax                     ; target high byte
+00076Br 1  88                   dey
+00076Cr 1  B1 E2                lda (FP),y              ; target low byte
+00076Er 1  38                   sec                     ; push target-1 for RTS
+00076Fr 1  E9 01                sbc #1
+000771r 1  B0 01                bcs @nb
+000773r 1  CA                   dex
+000774r 1  A8           @nb:    tay
+000775r 1  8A                   txa
+000776r 1  48                   pha
+000777r 1  98                   tya
+000778r 1  48                   pha
+000779r 1  A0 01                ldy #1
+00077Br 1  B1 E2                lda (FP),y              ; the bank to call into
+00077Dr 1  8D 20 D0             sta BANK
+000780r 1  A5 E4                lda FA                  ; registers as the caller left them
+000782r 1  A6 EE                ldx FX
+000784r 1  A4 E5                ldy FY
+000786r 1  60                   rts                     ; "return" into the target
+000787r 1               
+000787r 1               ; The callee returns here: back to the caller's bank, A X Y and carry kept
+000787r 1               farret:
+000787r 1  85 E4                sta FA
+000789r 1  68                   pla
+00078Ar 1  8D 20 D0             sta BANK
+00078Dr 1  A5 E4                lda FA
+00078Fr 1  60                   rts
+000790r 1               
+000790r 1               ; Returns if the disk command worked; else reports it and goes to the prompt
+000790r 1               ; (which resets the stack)
+000790r 1               dcheck:
+000790r 1  AD 41 D0             lda DSTAT
+000793r 1  D0 01                bne diskerr
+000795r 1  60                   rts
+000796r 1               
+000796r 1               ; Prints "? disk: <message>" for the status in A
+000796r 1               diskerr:
+000796r 1  48                   pha
+000797r 1  20 rr rr             jsr newline
+00079Ar 1  A9 rr A2 rr          PRINT s_derr
+00079Er 1  20 rr rr     
+0007A1r 1  68                   pla
+0007A2r 1  38                   sec
+0007A3r 1  E9 01                sbc #1
+0007A5r 1  C9 06                cmp #6
+0007A7r 1  B0 0D                bcs @unk
+0007A9r 1  AA                   tax
+0007AAr 1  BD rr rr             lda errlo,x
+0007ADr 1  48                   pha
+0007AEr 1  BD rr rr             lda errhi,x
+0007B1r 1  AA                   tax
+0007B2r 1  68                   pla
+0007B3r 1  20 rr rr             jsr puts
+0007B6r 1  4C rr rr     @unk:   jmp monitor
+0007B9r 1               
+0007B9r 1               usage:
+0007B9r 1  20 rr rr             jsr newline
+0007BCr 1  A9 rr A2 rr          PRINT s_what
+0007C0r 1  20 rr rr     
+0007C3r 1  4C rr rr             jmp monitor
+0007C6r 1               
+0007C6r 1               ; Prints DSTART.DEND-1 in hex, then back to the prompt
+0007C6r 1               showrange:
+0007C6r 1  AD 43 D0             lda DSTART+1
+0007C9r 1  20 rr rr             jsr prbyte
+0007CCr 1  AD 42 D0             lda DSTART
+0007CFr 1  20 rr rr             jsr prbyte
+0007D2r 1  A9 rr A2 rr          PRINT s_dot
+0007D6r 1  20 rr rr     
+0007D9r 1  38                   sec
+0007DAr 1  AD 44 D0             lda DEND
+0007DDr 1  E9 01                sbc #1
+0007DFr 1  AA                   tax
+0007E0r 1  AD 45 D0             lda DEND+1
+0007E3r 1  E9 00                sbc #0
+0007E5r 1  20 rr rr             jsr prbyte
+0007E8r 1  8A                   txa
+0007E9r 1  20 rr rr             jsr prbyte
+0007ECr 1  4C rr rr             jmp monitor
+0007EFr 1               
+0007EFr 1               ; Skips spaces at IN,Y
+0007EFr 1               skipsp:
+0007EFr 1  B9 00 02             lda IN,y
+0007F2r 1  C9 20                cmp #' '
+0007F4r 1  D0 03                bne @done
+0007F6r 1  C8                   iny
+0007F7r 1  D0 F6                bne skipsp
+0007F9r 1  60           @done:  rts
+0007FAr 1               
+0007FAr 1               ; Reads a file name at IN,Y (up to a space or the end of the line) and puts
+0007FAr 1               ; its address and length in DNAME/DNLEN. Carry clear if there was none.
+0007FAr 1               getname:
+0007FAr 1  20 rr rr             jsr skipsp
+0007FDr 1  8C 46 D0             sty DNAME               ; IN is page aligned: the low byte is Y
+000800r 1  A9 02                lda #>IN
+000802r 1  8D 47 D0             sta DNAME+1
+000805r 1  A2 00                ldx #0
+000807r 1  B9 00 02     @loop:  lda IN,y
+00080Ar 1  C9 20                cmp #' '
+00080Cr 1  F0 08                beq @end
+00080Er 1  C9 0D                cmp #CR
+000810r 1  F0 04                beq @end
+000812r 1  C8                   iny
+000813r 1  E8                   inx
+000814r 1  D0 F1                bne @loop
+000816r 1  8E 48 D0     @end:   stx DNLEN
+000819r 1  E0 01                cpx #1                  ; carry set if at least one character
+00081Br 1  60                   rts
+00081Cr 1               
+00081Cr 1               ; --- output --------------------------------------------------------------------
+00081Cr 1               
+00081Cr 1               ; New line, then "HHHH:" for XAM
+00081Cr 1               showaddr:
+00081Cr 1  20 rr rr             jsr newline
+00081Fr 1  A5 E9                lda XAM+1
+000821r 1  20 rr rr             jsr prbyte
+000824r 1  A5 E8                lda XAM
+000826r 1  20 rr rr             jsr prbyte
+000829r 1  A9 3A                lda #':'
+00082Br 1  4C rr rr             jmp putch
+00082Er 1               
+00082Er 1               ; " BB" for the byte at XAM
+00082Er 1               showbyte:
+00082Er 1  A9 20                lda #' '
+000830r 1  20 rr rr             jsr putch
+000833r 1  A2 00                ldx #0
+000835r 1  A1 E8                lda (XAM,x)
+000837r 1  4C rr rr             jmp prbyte
+00083Ar 1               
+00083Ar 1               ; Prints A as two hex digits
+00083Ar 1               prbyte:
+00083Ar 1  48                   pha
+00083Br 1  4A                   lsr
+00083Cr 1  4A                   lsr
+00083Dr 1  4A                   lsr
+00083Er 1  4A                   lsr
+00083Fr 1  20 rr rr             jsr prhex
+000842r 1  68                   pla
+000843r 1               ; Prints the low nibble of A as a hex digit
+000843r 1               prhex:
+000843r 1  29 0F                and #$0F
+000845r 1  09 30                ora #'0'
+000847r 1  C9 3A                cmp #'9'+1
+000849r 1  90 02                bcc putch
+00084Br 1  69 06                adc #6                  ; carry is set: +7 gives 'A'..'F'
+00084Dr 1               ; Prints A; A, X and Y are kept
+00084Dr 1               putch:
+00084Dr 1  8D 12 D0             sta DSP
+000850r 1  8D 80 02             sta LASTC
+000853r 1  60                   rts
+000854r 1               
+000854r 1               ; Starts a new line unless the cursor is already at the start of one
+000854r 1               newline:
+000854r 1  AD 80 02             lda LASTC
+000857r 1  C9 0D                cmp #CR
+000859r 1  F0 05                beq @done
+00085Br 1  A9 0D                lda #CR
+00085Dr 1  4C rr rr             jmp putch
+000860r 1  60           @done:  rts
+000861r 1               
+000861r 1               ; Prints the zero-terminated string at X (high) A (low); Y is kept
+000861r 1               puts:
+000861r 1  85 E6                sta SPTR
+000863r 1  86 E7                stx SPTR+1
+000865r 1  98                   tya
+000866r 1  48                   pha
+000867r 1  A0 00                ldy #0
+000869r 1  B1 E6        @loop:  lda (SPTR),y
+00086Br 1  F0 0A                beq @done
+00086Dr 1  20 rr rr             jsr putch
+000870r 1  C8                   iny
+000871r 1  D0 F6                bne @loop
+000873r 1  E6 E7                inc SPTR+1               ; strings may be longer than 255 bytes
+000875r 1  D0 F2                bne @loop
+000877r 1  68           @done:  pla
+000878r 1  A8                   tay
+000879r 1  60                   rts
+00087Ar 1               
+00087Ar 1               ; Waits for a key and returns it in A (bit 7 cleared)
+00087Ar 1               getkey:
+00087Ar 1  AD 11 D0             lda KBDCR
+00087Dr 1  10 FB                bpl getkey
+00087Fr 1  AD 10 D0             lda KBD
+000882r 1  29 7F                and #$7F
+000884r 1  60                   rts
+000885r 1               
+000885r 1               ; --- BRK -----------------------------------------------------------------------
+000885r 1               
+000885r 1               irq:
+000885r 1  48                   pha
+000886r 1  8A                   txa
+000887r 1  48                   pha
+000888r 1  BA                   tsx
+000889r 1  BD 03 01             lda $0103,x             ; P as pushed
+00088Cr 1  29 10                and #$10                ; B flag: was this a BRK?
+00088Er 1  D0 20                bne @brk
+000890r 1  98                   tya                     ; a real IRQ: A, X, Y and the bank kept
+000891r 1  48                   pha
+000892r 1  AD 20 D0             lda BANK
+000895r 1  48                   pha
+000896r 1  D8                   cld
+000897r 1  AD 09 D0             lda IRQBANK
+00089Ar 1  8D 20 D0             sta BANK
+00089Dr 1  AD 08 D0             lda IRQFLAGS            ; the sources (reading releases the IRQ)
+0008A0r 1  20 rr rr             jsr @call
+0008A3r 1  68                   pla
+0008A4r 1  8D 20 D0             sta BANK
+0008A7r 1  68                   pla
+0008A8r 1  A8                   tay
+0008A9r 1  68                   pla
+0008AAr 1  AA                   tax
+0008ABr 1  68                   pla
+0008ACr 1  40                   rti
+0008ADr 1  6C 0A D0     @call:  jmp (IRQVEC)
+0008B0r 1  68           @brk:   pla
+0008B1r 1  AA                   tax
+0008B2r 1  68                   pla
+0008B3r 1  8D 84 02             sta SAVA
+0008B6r 1               
+0008B6r 1               onbrk:
+0008B6r 1  8E 85 02             stx SAVX
+0008B9r 1  8C 86 02             sty SAVY
+0008BCr 1  68                   pla
+0008BDr 1  8D 87 02             sta SAVP
+0008C0r 1  68                   pla                     ; return address = BRK + 2
+0008C1r 1  38                   sec
+0008C2r 1  E9 02                sbc #2
+0008C4r 1  85 E8                sta XAM
+0008C6r 1  68                   pla
+0008C7r 1  E9 00                sbc #0
+0008C9r 1  85 E9                sta XAM+1
+0008CBr 1  20 rr rr             jsr newline
+0008CEr 1  A9 rr A2 rr          PRINT s_brk
+0008D2r 1  20 rr rr     
+0008D5r 1  A5 E9                lda XAM+1
+0008D7r 1  20 rr rr             jsr prbyte
+0008DAr 1  A5 E8                lda XAM
+0008DCr 1  20 rr rr             jsr prbyte
+0008DFr 1  A9 rr A2 rr          PRINT s_a
+0008E3r 1  20 rr rr     
+0008E6r 1  AD 84 02             lda SAVA
+0008E9r 1  20 rr rr             jsr prbyte
+0008ECr 1  A9 rr A2 rr          PRINT s_x
+0008F0r 1  20 rr rr     
+0008F3r 1  AD 85 02             lda SAVX
+0008F6r 1  20 rr rr             jsr prbyte
+0008F9r 1  A9 rr A2 rr          PRINT s_y
+0008FDr 1  20 rr rr     
+000900r 1  AD 86 02             lda SAVY
+000903r 1  20 rr rr             jsr prbyte
+000906r 1  A9 rr A2 rr          PRINT s_p
+00090Ar 1  20 rr rr     
+00090Dr 1  AD 87 02             lda SAVP
+000910r 1  20 rr rr             jsr prbyte
+000913r 1  A9 rr A2 rr          PRINT s_s
+000917r 1  20 rr rr     
+00091Ar 1  BA                   tsx
+00091Br 1  8A                   txa
+00091Cr 1  20 rr rr             jsr prbyte
+00091Fr 1  AD 87 02             lda SAVP                ; interrupts as they were before the BRK
+000922r 1  29 04                and #$04
+000924r 1  D0 01                bne @sei
+000926r 1  58                   cli
+000927r 1  4C rr rr     @sei:   jmp monitor
+00092Ar 1               
+00092Ar 1               nmi:
+00092Ar 1  4C rr rr             jmp monitor
+00092Dr 1               
+00092Dr 1               ; --- text ----------------------------------------------------------------------
+00092Dr 1               strings:
+00092Dr 1               s_banner:
+00092Dr 1  0D 6D 69 6E          .byte CR, "mini6502 monitor 1.0 - ? for help", CR, 0
+000931r 1  69 36 35 30  
+000935r 1  32 20 6D 6F  
+000951r 1               s_help:
+000951r 1  0D                   .byte CR
+000952r 1  48 48 48 48          .byte "HHHH         show a byte", CR
+000956r 1  20 20 20 20  
+00095Ar 1  20 20 20 20  
+00096Br 1  48 48 48 48          .byte "HHHH.HHHH    show a range   (.HHHH continues)", CR
+00096Fr 1  2E 48 48 48  
+000973r 1  48 20 20 20  
+000999r 1  48 48 48 48          .byte "HHHH: BB ..  store bytes    (: BB continues)", CR
+00099Dr 1  3A 20 42 42  
+0009A1r 1  20 2E 2E 20  
+0009C6r 1  48 48 48 48          .byte "HHHH R       run, RTS returns here", CR
+0009CAr 1  20 52 20 20  
+0009CEr 1  20 20 20 20  
+0009E9r 1  53 20 4E 41          .byte "S NAME HHHH.HHHH [BB]  save  L NAME [HHHH [BB]]  load (BB: bank)", CR
+0009EDr 1  4D 45 20 48  
+0009F1r 1  48 48 48 2E  
+000A2Ar 1  24 20 20 20          .byte "$            list the disk     K NAME  delete a file", CR
+000A2Er 1  20 20 20 20  
+000A32r 1  20 20 20 20  
+000A5Fr 1  54 20 4E 41          .byte "T NAME       type a text file as a script", CR
+000A63r 1  4D 45 20 20  
+000A67r 1  20 20 20 20  
+000A89r 1  57 20 20 20          .byte "W            clear the screen  X  exit mini6502", CR
+000A8Dr 1  20 20 20 20  
+000A91r 1  20 20 20 20  
+000AB9r 1  47 20 20 20          .byte "G            go back to the program (BASIC...)", CR
+000ABDr 1  20 20 20 20  
+000AC1r 1  20 20 20 20  
+000AE8r 1  56 20 5B 4E          .byte "V [NN BB HHHH [NAME]]  far-call table at CC00 (FARCALL is FFD0)", CR
+000AECr 1  4E 20 42 42  
+000AF0r 1  20 48 48 48  
+000B28r 1  4D 20 5B 42          .byte "M [BB OO]    the bank map (set bank BB's owner)", CR
+000B2Cr 1  42 20 4F 4F  
+000B30r 1  5D 20 20 20  
+000B58r 1  45 73 63 20          .byte "Esc cancels the line", CR, 0
+000B5Cr 1  63 61 6E 63  
+000B60r 1  65 6C 73 20  
+000B6Er 1  42 52 4B 20  s_brk:  .byte "BRK at ", 0
+000B72r 1  61 74 20 00  
+000B76r 1  20 20 41 3D  s_a:    .byte "  A=", 0
+000B7Ar 1  00           
+000B7Br 1  20 58 3D 00  s_x:    .byte " X=", 0
+000B7Fr 1  20 59 3D 00  s_y:    .byte " Y=", 0
+000B83r 1  20 50 3D 00  s_p:    .byte " P=", 0
+000B87r 1  20 53 3D 00  s_s:    .byte " S=", 0
+000B8Br 1  42 79 65 0D  s_bye:    .byte "Bye", CR, 0
+000B8Fr 1  00           
+000B90r 1  3F 20 75 73  s_vuse:   .byte "? usage: V   or   V NN BB HHHH [NAME]  (entry 00-27, bank, address)", 0
+000B94r 1  61 67 65 3A  
+000B98r 1  20 56 20 20  
+000BD4r 1  3F 20 75 73  s_muse:   .byte "? usage: M   or   M BB OO  (bank, owner; 00 = free)", 0
+000BD8r 1  61 67 65 3A  
+000BDCr 1  20 4D 20 20  
+000C08r 1  20 20 20 00  s_3sp:    .byte "   ", 0
+000C0Cr 1  20 20 00     s_2sp:    .byte "  ", 0
+000C0Fr 1  66 72 65 65  s_ofree:  .byte "free", 0
+000C13r 1  00           
+000C14r 1  73 79 73 74  s_osys:   .byte "system", 0
+000C18r 1  65 6D 00     
+000C1Br 1  62 79 20 68  s_ohand:  .byte "by hand", 0
+000C1Fr 1  61 6E 64 00  
+000C23r 1  6D 61 69 6E  s_omain:  .byte "main-RAM program", 0
+000C27r 1  2D 52 41 4D  
+000C2Br 1  20 70 72 6F  
+000C34r 1  62 61 6E 6B  s_obank:  .byte "bank ", 0
+000C38r 1  20 00        
+000C3Ar 1  6E 6F 20 76  s_vnone:  .byte "no vector table at CC00 (V NN BB HHHH makes one)", 0
+000C3Er 1  65 63 74 6F  
+000C42r 1  72 20 74 61  
+000C6Br 1  3A 20 62 61  s_vbank:  .byte ": bank ", 0
+000C6Fr 1  6E 6B 20 00  
+000C73r 1  2D 2D 20 75  s_vunused: .byte "-- unused", 0
+000C77r 1  6E 75 73 65  
+000C7Br 1  64 00        
+000C7Dr 1  3F 20 6E 6F  s_nowarm: .byte "? no program to go back to", 0
+000C81r 1  20 70 72 6F  
+000C85r 1  67 72 61 6D  
+000C98r 1  42 4F 4F 54  s_bootn:  .byte "BOOT", 0
+000C9Cr 1  00           
+000C9Dr 1  42 4F 4F 54  s_boottxt: .byte "BOOT.TXT", 0
+000CA1r 1  2E 54 58 54  
+000CA5r 1  00           
+000CA6r 1  42 6F 6F 74  s_boot:   .byte "Booting BOOT at ", 0
+000CAAr 1  69 6E 67 20  
+000CAEr 1  42 4F 4F 54  
+000CB7r 1  53 61 76 65  s_saved:  .byte "Saved ", 0
+000CBBr 1  64 20 00     
+000CBEr 1  44 65 6C 65  s_deleted: .byte "Deleted", 0
+000CC2r 1  74 65 64 00  
+000CC6r 1  4C 6F 61 64  s_loaded: .byte "Loaded ", 0
+000CCAr 1  65 64 20 00  
+000CCEr 1  3F 20 75 73  s_what:   .byte "? usage: S NAME HHHH.HHHH [BB]   L NAME [HHHH [BB]]   K NAME   T NAME   $", 0
+000CD2r 1  61 67 65 3A  
+000CD6r 1  20 53 20 4E  
+000D18r 1  2E 00        s_dot:    .byte ".", 0
+000D1Ar 1  3F 20 64 69  s_derr:   .byte "? disk: ", 0
+000D1Er 1  73 6B 3A 20  
+000D22r 1  00           
+000D23r 1  66 69 6C 65  s_e1:     .byte "file not found", 0
+000D27r 1  20 6E 6F 74  
+000D2Br 1  20 66 6F 75  
+000D32r 1  62 61 64 20  s_e2:     .byte "bad file name", 0
+000D36r 1  66 69 6C 65  
+000D3Ar 1  20 6E 61 6D  
+000D40r 1  64 6F 65 73  s_e3:     .byte "does not fit", 0
+000D44r 1  20 6E 6F 74  
+000D48r 1  20 66 69 74  
+000D4Dr 1  66 69 6C 65  s_e4:     .byte "file error", 0
+000D51r 1  20 65 72 72  
+000D55r 1  6F 72 00     
+000D58r 1  75 6E 6B 6E  s_e5:     .byte "unknown command", 0
+000D5Cr 1  6F 77 6E 20  
+000D60r 1  63 6F 6D 6D  
+000D68r 1  62 61 64 20  s_e6:     .byte "bad range", 0
+000D6Cr 1  72 61 6E 67  
+000D70r 1  65 00        
+000D72r 1  rr rr rr rr  errlo:    .byte <s_e1, <s_e2, <s_e3, <s_e4, <s_e5, <s_e6
+000D76r 1  rr rr        
+000D78r 1  rr rr rr rr  errhi:    .byte >s_e1, >s_e2, >s_e3, >s_e4, >s_e5, >s_e6
+000D7Cr 1  rr rr        
+000D7Er 1               
+000D7Er 1               ;=============================================================================
+000D7Er 1               ; Woz Monitor compatible entry points
+000D7Er 1               ;=============================================================================
+000D7Er 1               .segment "WOZ_RESET"            ; $FF00
+000000r 1  4C rr rr             jmp reset
+000003r 1               .segment "WOZ_GETLINE"          ; $FF1F
+000000r 1  4C rr rr             jmp monitor
+000003r 1               .segment "SYSCALLS"             ; $FFB0
+000000r 1  4C rr rr             jmp balloc              ; $FFB0
+000003r 1  4C rr rr             jmp bfree               ; $FFB3
+000006r 1  4C rr rr             jmp bfreeall            ; $FFB6
+000009r 1  4C rr rr             jmp bclaim              ; $FFB9
+00000Cr 1  4C rr rr             jmp vfind               ; $FFBC
+00000Fr 1  4C rr rr             jmp bowner              ; $FFBF
+000012r 1               .segment "FARCALL"              ; $FFD0
+000000r 1               farcall_entry:
+000000r 1  4C rr rr             jmp farcall
+000003r 1               .segment "WOZ_PRBYTE"           ; $FFDC
+000000r 1  4C rr rr             jmp prbyte
+000003r 1               .segment "WOZ_PRHEX"            ; $FFE5
+000000r 1  4C rr rr             jmp prhex
+000003r 1               .segment "WOZ_ECHO"             ; $FFEF
+000000r 1  4C rr rr             jmp putch               ; A, X and Y kept
+000003r 1               
+000003r 1               .segment "VECTORS"              ; $FFFA
+000000r 1  rr rr                .word nmi
+000002r 1  rr rr                .word reset
+000004r 1  rr rr                .word irq
+000004r 1               

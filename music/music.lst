@@ -1,0 +1,708 @@
+ca65 V2.19 - Git 52727a5
+Main file   : music.asm
+Current file: music.asm
+
+000000r 1               ; music.asm - the mini6502 music engine                   (bank $12, $E000)
+000000r 1               ; Public domain. Plays a song (a .MUS file, see README.txt) on the three
+000000r 1               ; music voices from the frame interrupt, so it keeps playing while other
+000000r 1               ; programs run. The noise voice (voice 4) is left to programs: sound
+000000r 1               ; effects never steal a note from the music.
+000000r 1               ;
+000000r 1               ; Calling it (far-call entries, made by V 19 12 E000 / V 1A 12 E003):
+000000r 1               ;   assembly  LDA #function : LDX #argument : JSR $CCD0      (entry $19)
+000000r 1               ;   BASIC     POKE 52446,function:POKE 52447,argument:CALL 52440 (entry $1A)
+000000r 1               ;             (52446/52447 = $CCDE/$CCDF, the spare bytes of entry $1A)
+000000r 1               ; Functions:
+000000r 1               ;   0 PLAY      X = the bank where the song starts (it may go on into the
+000000r 1               ;               next banks). Carry set (and nothing played) if it is not a
+000000r 1               ;               song. Takes the interrupt: IRQVEC, IRQBANK, IRQEN bit 0.
+000000r 1               ;   1 STOP      the music stops, the interrupt is let go
+000000r 1               ;   2 PAUSE     the voices are released; 3 CONTINUE carries on
+000000r 1               ;   4 STATUS    A = 0 stopped, 1 playing, 2 paused; X = order, Y = row
+000000r 1               ;               (BASIC: $CCDE = state, $CCDF = order)
+000000r 1               ;   5 VOLUME    X = 0-15, the loudness of the whole song (15 at first;
+000000r 1               ;               from each voice's next instrument or volume on)
+000000r 1               ;
+000000r 1               ; Inside the interrupt the engine uses port B (put back as it was), the
+000000r 1               ; voices 1-3 and nothing else: no zero page, no fixed RAM, all its
+000000r 1               ; variables are in this bank.
+000000r 1               
+000000r 1               BANK    = $D020
+000000r 1               IRQEN   = $D007
+000000r 1               IRQBANK = $D009
+000000r 1               IRQVEC  = $D00A
+000000r 1               SND     = $D030         ; voice N: NOTE, VOL, WAVE, DUR at SND + 4*N
+000000r 1               SHP     = $D050         ; voice N: DECAY, SWEEP, PULSE, BEND at SHP + 4*N
+000000r 1               PBADR   = $D208         ; port B: address (3 bytes), data, step
+000000r 1               PBDATA  = $D20B
+000000r 1               PBSTEP  = $D20C
+000000r 1               BOXFN   = $CCDE         ; BASIC's mailbox (spare bytes of entry $1A)
+000000r 1               BOXARG  = $CCDF
+000000r 1               
+000000r 1               NVOICE  = 3
+000000r 1               ; effects (column 3 of a pattern row; the 4th byte is its parameter)
+000000r 1               FX_ARP  = 1             ; arpeggio: note, +hi nibble, +lo nibble semitones
+000000r 1               FX_SLIDE = 2            ; SWEEP = parameter (signed) for this row
+000000r 1               FX_VIB  = 3             ; vibrato: speed (hi nibble), depth (lo nibble)
+000000r 1               FX_VOL  = 4             ; volume = parameter (0-15)
+000000r 1               FX_SPEED = 5            ; frames per row = parameter
+000000r 1               FX_JUMP = 6             ; after this row, go to order = parameter
+000000r 1               FX_BREAK = 7            ; after this row, go to the next order
+000000r 1               FX_PULSE = 8            ; PULSE = parameter (0-15)
+000000r 1               
+000000r 1               .segment "CODE"
+000000r 1  4C rr rr             jmp api                 ; $E000: A = function, X = argument
+000003r 1  4C rr rr             jmp apibox              ; $E003: the same from BASIC's mailbox
+000006r 1  4D 55 53 49          .byte "MUSIC", 0        ; (for whoever looks)
+00000Ar 1  43 00        
+00000Cr 1               
+00000Cr 1  AD DE CC     apibox: lda BOXFN
+00000Fr 1  AE DF CC             ldx BOXARG
+000012r 1  20 rr rr             jsr api
+000015r 1  8D DE CC             sta BOXFN
+000018r 1  8E DF CC             stx BOXARG
+00001Br 1  60                   rts
+00001Cr 1               
+00001Cr 1  C9 00        api:    cmp #0
+00001Er 1  D0 03                bne :+
+000020r 1  4C rr rr             jmp play
+000023r 1  C9 01        :       cmp #1
+000025r 1  D0 03                bne :+
+000027r 1  4C rr rr             jmp stop
+00002Ar 1  C9 02        :       cmp #2
+00002Cr 1  D0 03                bne :+
+00002Er 1  4C rr rr             jmp pause
+000031r 1  C9 03        :       cmp #3
+000033r 1  D0 0E                bne :+
+000035r 1  AD rr rr             lda STATE
+000038r 1  C9 02                cmp #2
+00003Ar 1  D0 05                bne @ok
+00003Cr 1  A9 01                lda #1
+00003Er 1  8D rr rr             sta STATE
+000041r 1  18           @ok:    clc
+000042r 1  60                   rts
+000043r 1  C9 04        :       cmp #4
+000045r 1  D0 0B                bne :+
+000047r 1  AD rr rr             lda STATE
+00004Ar 1  AE rr rr             ldx ORDER
+00004Dr 1  AC rr rr             ldy ROW
+000050r 1  18                   clc
+000051r 1  60                   rts
+000052r 1  C9 05        :       cmp #5
+000054r 1  D0 08                bne :+
+000056r 1  8A                   txa
+000057r 1  29 0F                and #15
+000059r 1  8D rr rr             sta MASTER
+00005Cr 1  18                   clc
+00005Dr 1  60                   rts
+00005Er 1  38           :       sec                     ; unknown function
+00005Fr 1  60                   rts
+000060r 1               
+000060r 1               ; --- PLAY ------------------------------------------------------------------
+000060r 1  A9 00        play:   lda #0                  ; the interrupt leaves us alone meanwhile
+000062r 1  8D rr rr             sta STATE
+000065r 1  20 rr rr             jsr silence
+000068r 1  8E rr rr             stx SBASE+2             ; song start = bank * 4096
+00006Br 1  8A                   txa
+00006Cr 1  0A                   asl
+00006Dr 1  0A                   asl
+00006Er 1  0A                   asl
+00006Fr 1  0A                   asl
+000070r 1  8D rr rr             sta SBASE+1
+000073r 1  AD rr rr             lda SBASE+2
+000076r 1  4A                   lsr
+000077r 1  4A                   lsr
+000078r 1  4A                   lsr
+000079r 1  4A                   lsr
+00007Ar 1  8D rr rr             sta SBASE+2
+00007Dr 1  A9 00                lda #0
+00007Fr 1  8D rr rr             sta SBASE
+000082r 1  20 rr rr             jsr savepb
+000085r 1  A9 00                lda #0                  ; the header
+000087r 1  8D rr rr             sta T0
+00008Ar 1  8D rr rr             sta T0+1
+00008Dr 1  20 rr rr             jsr seek
+000090r 1  A2 00                ldx #0
+000092r 1  AD 0B D2     @h:     lda PBDATA
+000095r 1  9D rr rr             sta HDR,x
+000098r 1  E8                   inx
+000099r 1  E0 10                cpx #16
+00009Br 1  D0 F5                bne @h
+00009Dr 1  AD rr rr             lda HDR
+0000A0r 1  C9 4D                cmp #'M'
+0000A2r 1  D0 07                bne @bad
+0000A4r 1  AD rr rr             lda HDR+1
+0000A7r 1  C9 55                cmp #'U'
+0000A9r 1  F0 05                beq @good
+0000ABr 1  20 rr rr     @bad:   jsr restpb
+0000AEr 1  38                   sec
+0000AFr 1  60                   rts
+0000B0r 1  AD rr rr     @good:  lda HDR+3
+0000B3r 1  8D rr rr             sta SPEED
+0000B6r 1  AD rr rr             lda HDR+4
+0000B9r 1  8D rr rr             sta NORD
+0000BCr 1  AD rr rr             lda HDR+5
+0000BFr 1  8D rr rr             sta LOOP
+0000C2r 1  AD rr rr             lda HDR+6
+0000C5r 1  8D rr rr             sta ROWS
+0000C8r 1  AD rr rr             lda HDR+7
+0000CBr 1  8D rr rr             sta NINS
+0000CEr 1  AD rr rr             lda HDR+12
+0000D1r 1  8D rr rr             sta PATOFF
+0000D4r 1  AD rr rr             lda HDR+13
+0000D7r 1  8D rr rr             sta PATOFF+1
+0000DAr 1  A9 10                lda #16                 ; the instruments, 8 bytes each, from byte 16
+0000DCr 1  8D rr rr             sta T0
+0000DFr 1  A9 00                lda #0
+0000E1r 1  8D rr rr             sta T0+1
+0000E4r 1  20 rr rr             jsr seek
+0000E7r 1  AD rr rr             lda NINS
+0000EAr 1  0A                   asl
+0000EBr 1  0A                   asl
+0000ECr 1  0A                   asl
+0000EDr 1  8D rr rr             sta T1                  ; (0 = 256: 32 instruments)
+0000F0r 1  A2 00                ldx #0
+0000F2r 1  AD 0B D2     @i:     lda PBDATA
+0000F5r 1  9D rr rr             sta INSTR,x
+0000F8r 1  E8                   inx
+0000F9r 1  EC rr rr             cpx T1
+0000FCr 1  D0 F4                bne @i
+0000FEr 1  AD rr rr             lda HDR+10              ; the order list, 3 pattern numbers each
+000101r 1  8D rr rr             sta T0
+000104r 1  AD rr rr             lda HDR+11
+000107r 1  8D rr rr             sta T0+1
+00010Ar 1  20 rr rr             jsr seek
+00010Dr 1  A2 00                ldx #0
+00010Fr 1  AD 0B D2     @o:     lda PBDATA
+000112r 1  9D rr rr             sta ORD0,x
+000115r 1  AD 0B D2             lda PBDATA
+000118r 1  9D rr rr             sta ORD1,x
+00011Br 1  AD 0B D2             lda PBDATA
+00011Er 1  9D rr rr             sta ORD2,x
+000121r 1  E8                   inx
+000122r 1  EC rr rr             cpx NORD
+000125r 1  D0 E8                bne @o
+000127r 1  20 rr rr             jsr restpb
+00012Ar 1  A2 02                ldx #NVOICE - 1         ; the voices from scratch
+00012Cr 1  A9 00        @v:     lda #0
+00012Er 1  9D rr rr             sta VINS,x
+000131r 1  9D rr rr             sta VEFF,x
+000134r 1  9D rr rr             sta VPAR,x
+000137r 1  9D rr rr             sta VVIB,x
+00013Ar 1  9D rr rr             sta VPH,x
+00013Dr 1  CA                   dex
+00013Er 1  10 EC                bpl @v
+000140r 1  A9 00                lda #0
+000142r 1  8D rr rr             sta ORDER
+000145r 1  8D rr rr             sta ROW
+000148r 1  8D rr rr             sta ARPC
+00014Br 1  A9 FF                lda #$FF
+00014Dr 1  8D rr rr             sta NEXTORD
+000150r 1  A9 01                lda #1                  ; row 0 at the next frame
+000152r 1  8D rr rr             sta TICK
+000155r 1  20 rr rr             jsr setorder
+000158r 1  A9 rr                lda #<handler           ; the frame interrupt is ours
+00015Ar 1  8D 0A D0             sta IRQVEC
+00015Dr 1  A9 rr                lda #>handler
+00015Fr 1  8D 0B D0             sta IRQVEC+1
+000162r 1  AD 20 D0             lda BANK
+000165r 1  8D 09 D0             sta IRQBANK
+000168r 1  8D rr rr             sta MYBANK
+00016Br 1  AD 07 D0             lda IRQEN
+00016Er 1  09 01                ora #1
+000170r 1  8D 07 D0             sta IRQEN
+000173r 1  A9 01                lda #1
+000175r 1  8D rr rr             sta STATE
+000178r 1  58                   cli
+000179r 1  18                   clc
+00017Ar 1  60                   rts
+00017Br 1               
+00017Br 1               ; --- STOP, PAUSE -------------------------------------------------------------
+00017Br 1  A9 00        stop:   lda #0
+00017Dr 1  8D rr rr             sta STATE
+000180r 1  20 rr rr             jsr silence
+000183r 1  AD 0A D0             lda IRQVEC              ; let go of the interrupt if it is still ours
+000186r 1  C9 rr                cmp #<handler
+000188r 1  D0 14                bne @n
+00018Ar 1  AD 0B D0             lda IRQVEC+1
+00018Dr 1  C9 rr                cmp #>handler
+00018Fr 1  D0 0D                bne @n
+000191r 1  AD 09 D0             lda IRQBANK
+000194r 1  CD rr rr             cmp MYBANK
+000197r 1  D0 05                bne @n
+000199r 1  A9 00                lda #0
+00019Br 1  8D 07 D0             sta IRQEN
+00019Er 1  18           @n:     clc
+00019Fr 1  60                   rts
+0001A0r 1               
+0001A0r 1  AD rr rr     pause:  lda STATE
+0001A3r 1  C9 01                cmp #1
+0001A5r 1  D0 08                bne @n
+0001A7r 1  A9 02                lda #2
+0001A9r 1  8D rr rr             sta STATE
+0001ACr 1  20 rr rr             jsr silence
+0001AFr 1  18           @n:     clc
+0001B0r 1  60                   rts
+0001B1r 1               
+0001B1r 1               ; Voices 1-3 released, their sweeps and bends back to 0 (keeps X)
+0001B1r 1               silence:
+0001B1r 1  A0 08                ldy #(NVOICE - 1) * 4
+0001B3r 1  A9 00        @s:     lda #0
+0001B5r 1  99 30 D0             sta SND,y               ; NOTE 0: released (fades out)
+0001B8r 1  99 51 D0             sta SHP+1,y
+0001BBr 1  99 53 D0             sta SHP+3,y
+0001BEr 1  88                   dey
+0001BFr 1  88                   dey
+0001C0r 1  88                   dey
+0001C1r 1  88                   dey
+0001C2r 1  10 EF                bpl @s
+0001C4r 1  60                   rts
+0001C5r 1               
+0001C5r 1               ; --- the interrupt ------------------------------------------------------------
+0001C5r 1               handler:
+0001C5r 1  29 01                and #1                  ; a frame?
+0001C7r 1  F0 25                beq @r
+0001C9r 1  AD rr rr             lda STATE
+0001CCr 1  C9 01                cmp #1
+0001CEr 1  D0 1E                bne @r
+0001D0r 1  20 rr rr             jsr savepb
+0001D3r 1  CE rr rr             dec TICK
+0001D6r 1  D0 10                bne @f
+0001D8r 1  AD rr rr             lda SPEED
+0001DBr 1  8D rr rr             sta TICK
+0001DEr 1  20 rr rr             jsr dorow
+0001E1r 1  AD rr rr             lda STATE               ; (the song may have ended)
+0001E4r 1  C9 01                cmp #1
+0001E6r 1  D0 03                bne @x
+0001E8r 1  20 rr rr     @f:     jsr doframe
+0001EBr 1  20 rr rr     @x:     jsr restpb
+0001EEr 1  60           @r:     rts
+0001EFr 1               
+0001EFr 1               ; One row: each voice's cell, then on to the next row
+0001EFr 1  A2 00        dorow:  ldx #0
+0001F1r 1  8E rr rr     @v:     stx CURV
+0001F4r 1  8A                   txa                     ; T0 = pattern start + ROW * 4
+0001F5r 1  0A                   asl
+0001F6r 1  0A                   asl
+0001F7r 1  A8                   tay                     ; (Y = voice * 4, kept for the registers)
+0001F8r 1  8C rr rr             sty CURY
+0001FBr 1  AD rr rr             lda ROW
+0001FEr 1  0A                   asl
+0001FFr 1  0A                   asl
+000200r 1  18                   clc
+000201r 1  7D rr rr             adc PADDR0,x
+000204r 1  8D 08 D2             sta PBADR
+000207r 1  BD rr rr             lda PADDR1,x
+00020Ar 1  69 00                adc #0
+00020Cr 1  8D 09 D2             sta PBADR+1
+00020Fr 1  BD rr rr             lda PADDR2,x
+000212r 1  69 00                adc #0
+000214r 1  8D 0A D2             sta PBADR+2
+000217r 1  A9 01                lda #1
+000219r 1  8D 0C D2             sta PBSTEP
+00021Cr 1  AD 0B D2             lda PBDATA
+00021Fr 1  8D rr rr             sta CNOTE
+000222r 1  AD 0B D2             lda PBDATA
+000225r 1  8D rr rr             sta CINS
+000228r 1  AD 0B D2             lda PBDATA
+00022Br 1  8D rr rr             sta CEFF
+00022Er 1  AD 0B D2             lda PBDATA
+000231r 1  8D rr rr             sta CPAR
+000234r 1  20 rr rr             jsr docell
+000237r 1  AE rr rr             ldx CURV
+00023Ar 1  E8                   inx
+00023Br 1  E0 03                cpx #NVOICE
+00023Dr 1  D0 B2                bne @v
+00023Fr 1  AD rr rr             lda NEXTORD             ; a jump or a break
+000242r 1  C9 FF                cmp #$FF
+000244r 1  F0 10                beq @next
+000246r 1  8D rr rr             sta ORDER
+000249r 1  A9 FF                lda #$FF
+00024Br 1  8D rr rr             sta NEXTORD
+00024Er 1  A9 00                lda #0
+000250r 1  8D rr rr             sta ROW
+000253r 1  4C rr rr             jmp @neword
+000256r 1  EE rr rr     @next:  inc ROW
+000259r 1  AD rr rr             lda ROW
+00025Cr 1  CD rr rr             cmp ROWS
+00025Fr 1  90 25                bcc @done
+000261r 1  A9 00                lda #0
+000263r 1  8D rr rr             sta ROW
+000266r 1  EE rr rr             inc ORDER
+000269r 1  AD rr rr     @neword: lda ORDER
+00026Cr 1  CD rr rr             cmp NORD
+00026Fr 1  90 12                bcc @in
+000271r 1  AD rr rr             lda LOOP                ; the end: loop, or stop
+000274r 1  C9 FF                cmp #$FF
+000276r 1  D0 08                bne @lp
+000278r 1  A9 00                lda #0
+00027Ar 1  8D rr rr             sta STATE
+00027Dr 1  4C rr rr             jmp silence
+000280r 1  8D rr rr     @lp:    sta ORDER
+000283r 1  4C rr rr     @in:    jmp setorder
+000286r 1  60           @done:  rts
+000287r 1               
+000287r 1               ; The cell of voice CURV (Y = CURV * 4)
+000287r 1  AE rr rr     docell: ldx CURV
+00028Ar 1  AD rr rr             lda CINS                ; a new instrument
+00028Dr 1  F0 37                beq @noins
+00028Fr 1  CD rr rr             cmp NINS
+000292r 1  F0 02                beq @insok
+000294r 1  B0 30                bcs @noins              ; (not in the song: ignored)
+000296r 1  9D rr rr     @insok: sta VINS,x
+000299r 1  20 rr rr             jsr insidx              ; X = its first byte in INSTR
+00029Cr 1  BD rr rr             lda INSTR+2,x           ; WAVE
+00029Fr 1  99 32 D0             sta SND+2,y
+0002A2r 1  BD rr rr             lda INSTR+1,x           ; VOL (times the song's volume)
+0002A5r 1  20 rr rr             jsr scalevol
+0002A8r 1  99 31 D0             sta SND+1,y
+0002ABr 1  BD rr rr             lda INSTR+0,x           ; DECAY
+0002AEr 1  99 50 D0             sta SHP+0,y
+0002B1r 1  BD rr rr             lda INSTR+4,x           ; PULSE
+0002B4r 1  99 52 D0             sta SHP+2,y
+0002B7r 1  BD rr rr             lda INSTR+5,x           ; DUR
+0002BAr 1  99 33 D0             sta SND+3,y
+0002BDr 1  BD rr rr             lda INSTR+6,x           ; the instrument's vibrato
+0002C0r 1  AE rr rr             ldx CURV
+0002C3r 1  9D rr rr             sta VVIB,x
+0002C6r 1  AE rr rr     @noins: ldx CURV
+0002C9r 1  AD rr rr             lda CEFF                ; nothing new (no note, no effect): the
+0002CCr 1  0D rr rr             ora CNOTE               ; arpeggio, vibrato or slide goes on
+0002CFr 1  D0 01                bne @chg
+0002D1r 1  60                   rts
+0002D2r 1  AD rr rr     @chg:   lda CEFF
+0002D5r 1  9D rr rr             sta VEFF,x
+0002D8r 1  AD rr rr             lda CPAR
+0002DBr 1  9D rr rr             sta VPAR,x
+0002DEr 1  AD rr rr             lda CEFF                ; SWEEP: the effect's for this row, else
+0002E1r 1  C9 02                cmp #FX_SLIDE           ; the instrument's
+0002E3r 1  D0 09                bne @nosl
+0002E5r 1  AD rr rr             lda CPAR
+0002E8r 1  99 51 D0             sta SHP+1,y
+0002EBr 1  4C rr rr             jmp @fx
+0002EEr 1  BD rr rr     @nosl:  lda VINS,x
+0002F1r 1  F0 0C                beq @fx
+0002F3r 1  20 rr rr             jsr insidx
+0002F6r 1  BD rr rr             lda INSTR+3,x
+0002F9r 1  99 51 D0             sta SHP+1,y
+0002FCr 1  AE rr rr             ldx CURV
+0002FFr 1  AD rr rr     @fx:    lda CEFF
+000302r 1  C9 04                cmp #FX_VOL
+000304r 1  D0 0C                bne :+
+000306r 1  AD rr rr             lda CPAR
+000309r 1  20 rr rr             jsr scalevol
+00030Cr 1  99 31 D0             sta SND+1,y
+00030Fr 1  4C rr rr             jmp @note
+000312r 1  C9 05        :       cmp #FX_SPEED
+000314r 1  D0 0E                bne :+
+000316r 1  AD rr rr             lda CPAR
+000319r 1  F0 3E                beq @note
+00031Br 1  8D rr rr             sta SPEED
+00031Er 1  8D rr rr             sta TICK
+000321r 1  4C rr rr             jmp @note
+000324r 1  C9 06        :       cmp #FX_JUMP
+000326r 1  D0 09                bne :+
+000328r 1  AD rr rr             lda CPAR
+00032Br 1  8D rr rr             sta NEXTORD
+00032Er 1  4C rr rr             jmp @note
+000331r 1  C9 07        :       cmp #FX_BREAK
+000333r 1  D0 0D                bne :+
+000335r 1  AE rr rr             ldx ORDER
+000338r 1  E8                   inx
+000339r 1  8E rr rr             stx NEXTORD
+00033Cr 1  AE rr rr             ldx CURV
+00033Fr 1  4C rr rr             jmp @note
+000342r 1  C9 08        :       cmp #FX_PULSE
+000344r 1  D0 09                bne :+
+000346r 1  AD rr rr             lda CPAR
+000349r 1  99 52 D0             sta SHP+2,y
+00034Cr 1  4C rr rr             jmp @note
+00034Fr 1  C9 03        :       cmp #FX_VIB
+000351r 1  D0 06                bne @note
+000353r 1  AD rr rr             lda CPAR
+000356r 1  9D rr rr             sta VVIB,x
+000359r 1  AD rr rr     @note:  lda CNOTE
+00035Cr 1  F0 09                beq @r
+00035Er 1  C9 FF                cmp #$FF
+000360r 1  D0 06                bne @on
+000362r 1  A9 00                lda #0                  ; note off: released
+000364r 1  99 30 D0             sta SND,y
+000367r 1  60           @r:     rts
+000368r 1  A9 00        @on:    lda #0
+00036Ar 1  9D rr rr             sta VPH,x
+00036Dr 1  99 53 D0             sta SHP+3,y             ; (no bend left from before)
+000370r 1  AD rr rr             lda CNOTE
+000373r 1  99 30 D0             sta SND,y               ; (written last: it starts the note)
+000376r 1  60                   rts
+000377r 1               
+000377r 1               ; X = (VINS,x - 1) * 8, the instrument's first byte in INSTR
+000377r 1  BD rr rr     insidx: lda VINS,x
+00037Ar 1  38                   sec
+00037Br 1  E9 01                sbc #1
+00037Dr 1  0A                   asl
+00037Er 1  0A                   asl
+00037Fr 1  0A                   asl
+000380r 1  AA                   tax
+000381r 1  60                   rts
+000382r 1               
+000382r 1               ; A (0-15) times MASTER / 15
+000382r 1               scalevol:
+000382r 1  29 0F                and #15
+000384r 1  8D rr rr             sta T1
+000387r 1  AD rr rr             lda MASTER
+00038Ar 1  0A                   asl
+00038Br 1  0A                   asl
+00038Cr 1  0A                   asl
+00038Dr 1  0A                   asl
+00038Er 1  0D rr rr             ora T1
+000391r 1  8E rr rr             stx T1
+000394r 1  AA                   tax
+000395r 1  BD rr rr             lda VOLT,x
+000398r 1  AE rr rr             ldx T1
+00039Br 1  60                   rts
+00039Cr 1               
+00039Cr 1               ; Every frame: arpeggios and vibratos, as BEND (in 1/8 semitones)
+00039Cr 1               doframe:
+00039Cr 1  EE rr rr             inc ARPC
+00039Fr 1  AD rr rr             lda ARPC
+0003A2r 1  C9 03                cmp #3
+0003A4r 1  90 05                bcc :+
+0003A6r 1  A9 00                lda #0
+0003A8r 1  8D rr rr             sta ARPC
+0003ABr 1  A2 00        :       ldx #0
+0003ADr 1  8A           @v:     txa
+0003AEr 1  0A                   asl
+0003AFr 1  0A                   asl
+0003B0r 1  A8                   tay
+0003B1r 1  A9 00                lda #0
+0003B3r 1  8D rr rr             sta T1                  ; the bend
+0003B6r 1  BD rr rr             lda VEFF,x
+0003B9r 1  C9 01                cmp #FX_ARP
+0003BBr 1  D0 1D                bne @vib
+0003BDr 1  BD rr rr             lda VPAR,x
+0003C0r 1  F0 18                beq @vib
+0003C2r 1  AC rr rr             ldy ARPC                ; 0: the note, 1: + hi nibble, 2: + lo
+0003C5r 1  F0 0F                beq @vibr
+0003C7r 1  88                   dey
+0003C8r 1  D0 04                bne @lo
+0003CAr 1  4A                   lsr
+0003CBr 1  4A                   lsr
+0003CCr 1  4A                   lsr
+0003CDr 1  4A                   lsr
+0003CEr 1  29 0F        @lo:    and #15
+0003D0r 1  0A                   asl                     ; semitones * 8
+0003D1r 1  0A                   asl
+0003D2r 1  0A                   asl
+0003D3r 1  8D rr rr             sta T1
+0003D6r 1  8A           @vibr:  txa
+0003D7r 1  0A                   asl
+0003D8r 1  0A                   asl
+0003D9r 1  A8                   tay
+0003DAr 1  BD rr rr     @vib:   lda VVIB,x              ; speed (hi nibble), depth (lo nibble)
+0003DDr 1  F0 40                beq @set
+0003DFr 1  29 F0                and #$F0                ; phase += speed * 4 (a cycle in 64/speed
+0003E1r 1  4A                   lsr                     ; frames)
+0003E2r 1  4A                   lsr
+0003E3r 1  18                   clc
+0003E4r 1  7D rr rr             adc VPH,x
+0003E7r 1  9D rr rr             sta VPH,x
+0003EAr 1  4A                   lsr                     ; triangle step -8..+8 from the phase
+0003EBr 1  4A                   lsr
+0003ECr 1  4A                   lsr
+0003EDr 1  4A                   lsr
+0003EEr 1  8C rr rr             sty CURY
+0003F1r 1  A8                   tay
+0003F2r 1  B9 rr rr             lda tri,y
+0003F5r 1  8D rr rr             sta T2
+0003F8r 1  BD rr rr             lda VVIB,x
+0003FBr 1  29 0F                and #15
+0003FDr 1  A8                   tay
+0003FEr 1  A9 00                lda #0                  ; T2 * depth / 8
+000400r 1  C0 00        @m:     cpy #0
+000402r 1  F0 08                beq @md
+000404r 1  18                   clc
+000405r 1  6D rr rr             adc T2
+000408r 1  88                   dey
+000409r 1  4C rr rr             jmp @m
+00040Cr 1  C9 80        @md:    cmp #$80                ; signed / 8
+00040Er 1  6A                   ror
+00040Fr 1  C9 80                cmp #$80
+000411r 1  6A                   ror
+000412r 1  C9 80                cmp #$80
+000414r 1  6A                   ror
+000415r 1  18                   clc
+000416r 1  6D rr rr             adc T1
+000419r 1  8D rr rr             sta T1
+00041Cr 1  AC rr rr             ldy CURY
+00041Fr 1  AD rr rr     @set:   lda T1
+000422r 1  99 53 D0             sta SHP+3,y
+000425r 1  E8                   inx
+000426r 1  E0 03                cpx #NVOICE
+000428r 1  D0 83                bne @v
+00042Ar 1  60                   rts
+00042Br 1               
+00042Br 1  00 02 04 06  tri:    .byte 0, 2, 4, 6, 8, 6, 4, 2, 0, <-2, <-4, <-6, <-8, <-6, <-4, <-2
+00042Fr 1  08 06 04 02  
+000433r 1  00 FE FC FA  
+00043Br 1               
+00043Br 1               ; Each voice's pattern for ORDER: song + PATOFF + pattern * ROWS * 4
+00043Br 1               setorder:
+00043Br 1  A2 00                ldx #0
+00043Dr 1  AC rr rr     @v:     ldy ORDER
+000440r 1  E0 01                cpx #1
+000442r 1  F0 08                beq @o1
+000444r 1  B0 0C                bcs @o2
+000446r 1  B9 rr rr             lda ORD0,y
+000449r 1  4C rr rr             jmp @p
+00044Cr 1  B9 rr rr     @o1:    lda ORD1,y
+00044Fr 1  4C rr rr             jmp @p
+000452r 1  B9 rr rr     @o2:    lda ORD2,y
+000455r 1  8D rr rr     @p:     sta T1                  ; T2:T3 = pattern * ROWS (8 x 8 bits)
+000458r 1  A9 00                lda #0
+00045Ar 1  8D rr rr             sta T2
+00045Dr 1  8D rr rr             sta T3
+000460r 1  8D rr rr             sta T4                  ; (the third byte of * 4)
+000463r 1  A0 08                ldy #8
+000465r 1  0E rr rr     @mul:   asl T2
+000468r 1  2E rr rr             rol T3
+00046Br 1  0E rr rr             asl T1
+00046Er 1  90 12                bcc @nb
+000470r 1  18                   clc
+000471r 1  AD rr rr             lda T2
+000474r 1  6D rr rr             adc ROWS
+000477r 1  8D rr rr             sta T2
+00047Ar 1  AD rr rr             lda T3
+00047Dr 1  69 00                adc #0
+00047Fr 1  8D rr rr             sta T3
+000482r 1  88           @nb:    dey
+000483r 1  D0 E0                bne @mul
+000485r 1  0E rr rr             asl T2                  ; * 4
+000488r 1  2E rr rr             rol T3
+00048Br 1  2E rr rr             rol T4
+00048Er 1  0E rr rr             asl T2
+000491r 1  2E rr rr             rol T3
+000494r 1  2E rr rr             rol T4
+000497r 1  18                   clc                     ; + PATOFF + the song's start
+000498r 1  AD rr rr             lda T2
+00049Br 1  6D rr rr             adc PATOFF
+00049Er 1  8D rr rr             sta T2
+0004A1r 1  AD rr rr             lda T3
+0004A4r 1  6D rr rr             adc PATOFF+1
+0004A7r 1  8D rr rr             sta T3
+0004AAr 1  AD rr rr             lda T4
+0004ADr 1  69 00                adc #0
+0004AFr 1  8D rr rr             sta T4
+0004B2r 1  18                   clc
+0004B3r 1  AD rr rr             lda T2
+0004B6r 1  6D rr rr             adc SBASE
+0004B9r 1  9D rr rr             sta PADDR0,x
+0004BCr 1  AD rr rr             lda T3
+0004BFr 1  6D rr rr             adc SBASE+1
+0004C2r 1  9D rr rr             sta PADDR1,x
+0004C5r 1  AD rr rr             lda T4
+0004C8r 1  6D rr rr             adc SBASE+2
+0004CBr 1  9D rr rr             sta PADDR2,x
+0004CEr 1  E8                   inx
+0004CFr 1  E0 03                cpx #NVOICE
+0004D1r 1  F0 03                beq :+
+0004D3r 1  4C rr rr             jmp @v
+0004D6r 1  60           :       rts
+0004D7r 1               
+0004D7r 1               ; Port B to the song's byte T0 (16 bits), step 1
+0004D7r 1  18           seek:   clc
+0004D8r 1  AD rr rr             lda SBASE
+0004DBr 1  6D rr rr             adc T0
+0004DEr 1  8D 08 D2             sta PBADR
+0004E1r 1  AD rr rr             lda SBASE+1
+0004E4r 1  6D rr rr             adc T0+1
+0004E7r 1  8D 09 D2             sta PBADR+1
+0004EAr 1  AD rr rr             lda SBASE+2
+0004EDr 1  69 00                adc #0
+0004EFr 1  8D 0A D2             sta PBADR+2
+0004F2r 1  A9 01                lda #1
+0004F4r 1  8D 0C D2             sta PBSTEP
+0004F7r 1  60                   rts
+0004F8r 1               
+0004F8r 1               ; Port B kept / put back (it belongs to whoever we interrupted)
+0004F8r 1  AD 08 D2     savepb: lda PBADR
+0004FBr 1  8D rr rr             sta SAVPB
+0004FEr 1  AD 09 D2             lda PBADR+1
+000501r 1  8D rr rr             sta SAVPB+1
+000504r 1  AD 0A D2             lda PBADR+2
+000507r 1  8D rr rr             sta SAVPB+2
+00050Ar 1  AD 0C D2             lda PBSTEP
+00050Dr 1  8D rr rr             sta SAVPB+3
+000510r 1  60                   rts
+000511r 1  AD rr rr     restpb: lda SAVPB
+000514r 1  8D 08 D2             sta PBADR
+000517r 1  AD rr rr             lda SAVPB+1
+00051Ar 1  8D 09 D2             sta PBADR+1
+00051Dr 1  AD rr rr             lda SAVPB+2
+000520r 1  8D 0A D2             sta PBADR+2
+000523r 1  AD rr rr             lda SAVPB+3
+000526r 1  8D 0C D2             sta PBSTEP
+000529r 1  60                   rts
+00052Ar 1               
+00052Ar 1               ; volume table: VOLT[master * 16 + vol] = vol * master / 15, rounded
+00052Ar 1               VOLT:
+00052Ar 1  00 00 00 00  .repeat 16, M
+00052Er 1  00 00 00 00  
+000532r 1  00 00 00 00  
+00062Ar 1                 .repeat 16, V
+00062Ar 1                       .byte (V * M + 7) / 15
+00062Ar 1                 .endrepeat
+00062Ar 1               .endrepeat
+00062Ar 1               
+00062Ar 1               ; --- variables (in this bank) -------------------------------------------------
+00062Ar 1  00           STATE:  .byte 0                 ; 0 stopped, 1 playing, 2 paused
+00062Br 1  0F           MASTER: .byte 15
+00062Cr 1  00           MYBANK: .byte 0
+00062Dr 1  xx xx xx     SBASE:  .res 3                  ; the song's extended address
+000630r 1  xx xx xx xx  HDR:    .res 16
+000634r 1  xx xx xx xx  
+000638r 1  xx xx xx xx  
+000640r 1  00           SPEED:  .byte 0
+000641r 1  00           TICK:   .byte 0
+000642r 1  00           ROW:    .byte 0
+000643r 1  00           ORDER:  .byte 0
+000644r 1  00           NEXTORD: .byte 0
+000645r 1  00           NORD:   .byte 0
+000646r 1  00           LOOP:   .byte 0
+000647r 1  00           ROWS:   .byte 0
+000648r 1  00           NINS:   .byte 0
+000649r 1  xx xx        PATOFF: .res 2
+00064Br 1  00           ARPC:   .byte 0
+00064Cr 1  xx xx xx xx  SAVPB:  .res 4
+000650r 1  xx xx        T0:     .res 2
+000652r 1  00           T1:     .byte 0
+000653r 1  00           T2:     .byte 0
+000654r 1  00           T3:     .byte 0
+000655r 1  00           T4:     .byte 0
+000656r 1  00           CURV:   .byte 0
+000657r 1  00           CURY:   .byte 0
+000658r 1  00           CNOTE:  .byte 0
+000659r 1  00           CINS:   .byte 0
+00065Ar 1  00           CEFF:   .byte 0
+00065Br 1  00           CPAR:   .byte 0
+00065Cr 1  xx xx xx     PADDR0: .res NVOICE             ; each voice's pattern (extended address)
+00065Fr 1  xx xx xx     PADDR1: .res NVOICE
+000662r 1  xx xx xx     PADDR2: .res NVOICE
+000665r 1  xx xx xx     VINS:   .res NVOICE             ; instrument, effect, parameter, vibrato,
+000668r 1  xx xx xx     VEFF:   .res NVOICE             ; vibrato phase
+00066Br 1  xx xx xx     VPAR:   .res NVOICE
+00066Er 1  xx xx xx     VVIB:   .res NVOICE
+000671r 1  xx xx xx     VPH:    .res NVOICE
+000674r 1  xx xx xx xx  INSTR:  .res 256                ; up to 32 instruments of 8 bytes
+000678r 1  xx xx xx xx  
+00067Cr 1  xx xx xx xx  
+000774r 1  xx xx xx xx  ORD0:   .res 256                ; the order list: voice 1, 2, 3 patterns
+000778r 1  xx xx xx xx  
+00077Cr 1  xx xx xx xx  
+000874r 1  xx xx xx xx  ORD1:   .res 256
+000878r 1  xx xx xx xx  
+00087Cr 1  xx xx xx xx  
+000974r 1  xx xx xx xx  ORD2:   .res 256
+000978r 1  xx xx xx xx  
+00097Cr 1  xx xx xx xx  
+000A74r 1                       .assert * <= $F000, error, "the music engine must fit in its bank"
+000A74r 1               

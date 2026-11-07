@@ -1,0 +1,110 @@
+# demo.txt - a short demo song for the mini6502 music engine
+# Copyright (C) 2026 Benoit Colson. With the help of Claude AI.
+# Free software under the GNU General Public License, version 3 or
+# (at your option) any later version, WITHOUT ANY WARRANTY; see COPYING.
+title  Little minor march
+speed  7
+rows   32
+loop   0
+
+instrument 1 lead   wave=square vol=10 dur=6 pulse=6
+instrument 2 bass   wave=triangle vol=15 dur=5
+instrument 3 chord  wave=saw vol=5
+instrument 4 sing   wave=square vol=9 pulse=11 vib=26
+
+pattern melA
+C-5 1
+---
+D#5
+---
+G-5
+---
+F-5
+D#5
+D-5
+---
+C-5
+---
+D-5
+D#5
+F-5
+---
+G-5
+---
+G#5
+G-5
+F-5
+---
+D#5
+---
+D-5
+C-5
+D-5
+---
+C-5
+
+pattern melB
+G-5 4
+... 5
+===
+---
+F-5
+... 5
+===
+---
+D#5
+... 5
+D-5
+---
+C-5
+... 3
+--- . SF4
+---
+===
+
+pattern bass
+C-2 2
+---
+C-3
+---
+C-2
+---
+C-3
+---
+F-2
+---
+F-3
+---
+F-2
+---
+F-3
+---
+G#2
+---
+G#3
+---
+G#2
+---
+G#3
+---
+G-2
+---
+G-3
+---
+G-2
+---
+B-2
+
+pattern chords
+C-4 3 A37
+... 7
+F-4 . A37
+... 7
+G#3 . A47
+... 7
+G-3 . A47
+... 6
+===
+
+order melA bass chords
+order melB bass chords

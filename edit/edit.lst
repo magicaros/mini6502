@@ -1,0 +1,1868 @@
+ca65 V2.19 - Git 52727a5
+Main file   : edit.asm
+Current file: edit.asm
+
+000000r 1               ;=============================================================================
+000000r 1               ; edit.asm - full-screen text editor for mini6502          (bank RAM $E000-$EFFF)
+000000r 1               ;-----------------------------------------------------------------------------
+000000r 1               ; Public domain.
+000000r 1               ;
+000000r 1               ;   L EDIT E000 13      load the editor into bank $13 (any bank below $E0)
+000000r 1               ; Start it from the monitor or from BASIC, with its bank selected:
+000000r 1               ;   E000R / CALL $E000  start with an empty text
+000000r 1               ;   E003R / CALL $E003  carry on with the text from last time (empty if none)
+000000r 1               ; The whole fixed RAM ($0000-$CBFF) of the caller is saved to banks $F0-$FC
+000000r 1               ; first, and the editor gets its own copy (kept in banks $E0-$EC while away),
+000000r 1               ; so BASIC and its program stay alive. Esc puts the caller's RAM back and
+000000r 1               ; returns to it (RTS): to BASIC after a CALL, to the monitor after R.
+000000r 1               ; While editing, G is pointed at a stub at $CBF0 (in the editor's RAM) that
+000000r 1               ; selects the editor's bank: after F1, G resumes; Esc then still returns to
+000000r 1               ; the caller, and the caller's G is put back.
+000000r 1               ;
+000000r 1               ; Keys
+000000r 1               ;   arrows, Home, End, PgUp, PgDn    move           Enter       new line
+000000r 1               ;   Backspace / Delete               erase          Tab         spaces to
+000000r 1               ;   Ctrl+S  save    Ctrl+L  load    Ctrl+N  new                 the next 8th
+000000r 1               ;   Esc     back to the caller (text kept)                      column
+000000r 1               ;   Typed letters follow F6 (CAPS): switch it off for lower case.
+000000r 1               ;
+000000r 1               ; Files are plain text in the mini6502 disk folder (the usual 2-byte load
+000000r 1               ; address first). Lines end with CR; LF and CR LF are turned into CR when a
+000000r 1               ; file is loaded, so text from elsewhere works too.
+000000r 1               ;
+000000r 1               ; Memory (in the editor's own RAM image): text $0400-$CBEF (51,184 bytes, as
+000000r 1               ; a gap buffer), state in zero page $10-$3F and page 3 ($0300-$035F), stub
+000000r 1               ; $CBF0-$CBF7. Banks $E0-$EC and $F0-$FC hold the two RAM images; $EFF0-$EFF6
+000000r 1               ; in the editor's bank says which one is in the RAM.
+000000r 1               ; Limits: columns past 255 are not shown; lines longer than 80 columns
+000000r 1               ; scroll the whole screen sideways.
+000000r 1               ;=============================================================================
+000000r 1               
+000000r 1               ; --- mini6502 I/O --------------------------------------------------------------
+000000r 1                       .include "mini6502.inc"     ; the registers (hw/mini6502.inc)
+000000r 2               ; mini6502.inc - made by hw/gen.py from hw/mini6502.def: edit that, not this.
+000000r 2               ; The mini6502's registers, banks, far-call entries and system calls.
+000000r 2               ; In a program: .include "mini6502.inc" (ca65 -I path/to/hw). Including it
+000000r 2               ; twice is fine.
+000000r 2               
+000000r 2               .ifndef MINI6502_INC
+000000r 2               MINI6502_INC = 1
+000000r 2               
+000000r 2               ; registers
+000000r 2               SYSCTL      = $D000   ; read/write
+000000r 2               FRAME       = $D001   ; read
+000000r 2               WARMLO      = $D002   ; read/write
+000000r 2               WARMHI      = $D003   ; read/write
+000000r 2               CLOCKH      = $D004   ; read
+000000r 2               CLOCKM      = $D005   ; read
+000000r 2               CLOCKS      = $D006   ; read
+000000r 2               IRQEN       = $D007   ; read/write
+000000r 2               IRQFLAGS    = $D008   ; read
+000000r 2               IRQBANK     = $D009   ; read/write
+000000r 2               IRQVEC      = $D00A   ; read/write, 2 bytes
+000000r 2               KBD         = $D010   ; read
+000000r 2               KBDCR       = $D011   ; read
+000000r 2               DSP         = $D012   ; write
+000000r 2               DSPCR       = $D013   ; reads 0
+000000r 2               KBDPEEK     = $D014   ; read
+000000r 2               CURX        = $D015   ; read/write
+000000r 2               CURY        = $D016   ; read/write
+000000r 2               VCHR        = $D017   ; read/write
+000000r 2               VCOL        = $D018   ; read/write
+000000r 2               KBDEXT      = $D019   ; read
+000000r 2               BANK        = $D020   ; read/write
+000000r 2               COLOR       = $D021   ; read/write
+000000r 2               SND         = $D030   ; read/write, 16 bytes
+000000r 2               V1          = $D030   ; read/write, 4 bytes
+000000r 2               V2          = $D034   ; read/write, 4 bytes
+000000r 2               V3          = $D038   ; read/write, 4 bytes
+000000r 2               V4          = $D03C   ; read/write, 4 bytes
+000000r 2               SHP         = $D050   ; read/write, 16 bytes
+000000r 2               S1          = $D050   ; read/write, 4 bytes
+000000r 2               S2          = $D054   ; read/write, 4 bytes
+000000r 2               S3          = $D058   ; read/write, 4 bytes
+000000r 2               S4          = $D05C   ; read/write, 4 bytes
+000000r 2               BEEP        = $D100   ; read/write
+000000r 2               DCMD        = $D040   ; read/write
+000000r 2               DSTAT       = $D041   ; read/write
+000000r 2               DSTART      = $D042   ; read/write, 2 bytes
+000000r 2               DEND        = $D044   ; read/write, 2 bytes
+000000r 2               DNAME       = $D046   ; read/write, 2 bytes
+000000r 2               DNLEN       = $D048   ; read/write
+000000r 2               PADR        = $D200   ; read/write, 3 bytes
+000000r 2               PDATA       = $D203   ; read/write
+000000r 2               PSTEP       = $D204   ; read/write
+000000r 2               PBADR       = $D208   ; read/write, 3 bytes
+000000r 2               PBDATA      = $D20B   ; read/write
+000000r 2               PBSTEP      = $D20C   ; read/write
+000000r 2               DMASRC      = $D210   ; read/write, 3 bytes
+000000r 2               DMADST      = $D213   ; read/write, 3 bytes
+000000r 2               DMALEN      = $D216   ; read/write, 3 bytes
+000000r 2               DMACMD      = $D219   ; read/write
+000000r 2               DMAFILL     = $D21A   ; read/write
+000000r 2               DMASTAT     = $D21B   ; read
+000000r 2               VID         = $D300   ; read/write, 64 bytes
+000000r 2               MODE        = $D300   ; read/write
+000000r 2               SHOW        = $D301   ; read/write
+000000r 2               DRAW        = $D302   ; read/write
+000000r 2               INTENS      = $D303   ; read/write
+000000r 2               MASTER      = $D304   ; read/write
+000000r 2               TRANSP      = $D305   ; read/write
+000000r 2               INK         = $D306   ; read/write
+000000r 2               PAPER       = $D307   ; read/write
+000000r 2               PALIDX      = $D308   ; read/write
+000000r 2               PALR        = $D309   ; read/write
+000000r 2               PALG        = $D30A   ; read/write
+000000r 2               PALB        = $D30B   ; read/write
+000000r 2               BX0         = $D310   ; read/write
+000000r 2               BY0         = $D311   ; read/write
+000000r 2               BX1         = $D312   ; read/write
+000000r 2               BY1         = $D313   ; read/write
+000000r 2               BCOL        = $D314   ; read/write
+000000r 2               BDX         = $D315   ; read/write
+000000r 2               BDY         = $D316   ; read/write
+000000r 2               BSRC        = $D317   ; read/write
+000000r 2               BCMD        = $D318   ; read/write
+000000r 2               BPIXEL      = $D319   ; read
+000000r 2               BX0H        = $D31A   ; read/write
+000000r 2               BY0H        = $D31B   ; read/write
+000000r 2               BX1H        = $D31C   ; read/write
+000000r 2               BY1H        = $D31D   ; read/write
+000000r 2               BDXH        = $D31E   ; read/write
+000000r 2               BDYH        = $D31F   ; read/write
+000000r 2               COLLSS      = $D320   ; read, 4 bytes
+000000r 2               COLLBG      = $D324   ; read, 4 bytes
+000000r 2               ROP         = $D328   ; read/write
+000000r 2               PATON       = $D329   ; read/write
+000000r 2               CHR         = $D32A   ; read/write
+000000r 2               STYLE       = $D32B   ; read/write
+000000r 2               CHOUT       = $D32C   ; read/write
+000000r 2               PATTERN     = $D330   ; read/write, 8 bytes
+000000r 2               CLIPR       = $D338   ; read/write, 8 bytes
+000000r 2               SPR         = $D400   ; read/write, 256 bytes
+000000r 2               MOUSEX      = $D500   ; read, 2 bytes
+000000r 2               MOUSEY      = $D502   ; read, 2 bytes
+000000r 2               BUTTONS     = $D504   ; read
+000000r 2               WHEEL       = $D505   ; read
+000000r 2               CLICKS      = $D506   ; read
+000000r 2               PTR         = $D508   ; read/write
+000000r 2               PTRX        = $D509   ; read/write, 2 bytes
+000000r 2               PTRY        = $D50B   ; read/write, 2 bytes
+000000r 2               HOTX        = $D50D   ; read/write
+000000r 2               HOTY        = $D50E   ; read/write
+000000r 2               PTRIMG      = $D510   ; read/write, 32 bytes
+000000r 2               PTRMASK     = $D530   ; read/write, 32 bytes
+000000r 2               MOUSELX     = $D550   ; read
+000000r 2               MOUSELY     = $D551   ; read
+000000r 2               MOUSECOL    = $D552   ; read
+000000r 2               MOUSEROW    = $D553   ; read
+000000r 2               ; numbers
+000000r 2               IRQ_FRAME   = 1
+000000r 2               IRQ_KEY     = 2
+000000r 2               IRQ_MOUSE   = 4
+000000r 2               V_NOTE      = 0
+000000r 2               V_VOL       = 1
+000000r 2               V_WAVE      = 2
+000000r 2               V_DUR       = 3
+000000r 2               S_DECAY     = 0
+000000r 2               S_SWEEP     = 1
+000000r 2               S_PULSE     = 2
+000000r 2               S_BEND      = 3
+000000r 2               C_CLEAR     = 1
+000000r 2               C_PSET      = 2
+000000r 2               C_LINE      = 3
+000000r 2               C_BOX       = 4
+000000r 2               C_BOXF      = 5
+000000r 2               C_COPY      = 6
+000000r 2               C_COPYT     = 7
+000000r 2               C_DIM       = 8
+000000r 2               C_UNDIM     = 9
+000000r 2               C_STAMP     = $0A
+000000r 2               C_CHAR      = $0B
+000000r 2               VTAB        = $CC00
+000000r 2               VTCOUNT     = $CC02
+000000r 2               VTENTRY     = $CC08
+000000r 2               VTMAX       = $28
+000000r 2               VTNAMES     = $CD48
+000000r 2               BANKMAP     = $CF00
+000000r 2               FARCALL     = $FFD0
+000000r 2               ; bank zones (first, last)
+000000r 2               Z_BASICEXT  = 0       ; EhBASIC extensions (kept free for them)
+000000r 2               Z_BASICEXT_END= 7
+000000r 2               Z_USER      = 8       ; yours: load by hand; never handed out
+000000r 2               Z_USER_END  = $0F
+000000r 2               Z_SYSTEM    = $10     ; the system's programs
+000000r 2               Z_SYSTEM_END= $1F
+000000r 2               Z_PROGRAMS  = $20     ; programs (the allocator hands these out)
+000000r 2               Z_PROGRAMS_END= $7F
+000000r 2               Z_DOCUMENTS = $80     ; documents, songs, data (handed out too)
+000000r 2               Z_DOCUMENTS_END= $BF
+000000r 2               Z_SWAP      = $C0     ; the fixed RAM's copies while programs swap it
+000000r 2               Z_SWAP_END  = $FF
+000000r 2               ; fixed banks
+000000r 2               B_LULLABY   = 8       ; the lullaby demo (BOOT.TXT loads it)
+000000r 2               B_TK1       = $10     ; the toolkit, part 1 (TK1)
+000000r 2               B_TK2       = $11     ; the toolkit, part 2 (TK2)
+000000r 2               B_MUSIC     = $12     ; the music engine (MUSIC)
+000000r 2               B_EDIT      = $13     ; the editor (EDIT)
+000000r 2               B_DESK1     = $14     ; the desktop, part 1 (DESK1)
+000000r 2               B_DESK2     = $15     ; the desktop, part 2 (DESK2)
+000000r 2               B_DESK3     = $16     ; the desktop, part 3: icons (DESK3)
+000000r 2               B_LAUNCH    = $20     ; where the desktop loads bank programs
+000000r 2               B_DESKSAVE  = $C0     ; the desktop's RAM while a program runs
+000000r 2               B_TKSWAP    = $D0     ; the caller's RAM while a toolkit program runs
+000000r 2               B_EDITIMG   = $E0     ; the editor's RAM while away
+000000r 2               B_EDITWORLD = $F0     ; the caller's RAM while editing
+000000r 2               ; far-call entries: E_NAME = its address (JSR E_NAME), EN_NAME = its number
+000000r 2               E_LULLABY   = $CC08   ; plays the lullaby
+000000r 2               EN_LULLABY  = 0
+000000r 2               E_EDITNEW   = $CC10   ; the editor, with an empty text
+000000r 2               EN_EDITNEW  = 1
+000000r 2               E_EDIT      = $CC18   ; the editor, with the text as it was (BASIC: CALL EDIT)
+000000r 2               EN_EDIT     = 2
+000000r 2               E_TOOLKIT   = $CC88   ; the toolkit: LDA #function, JSR
+000000r 2               EN_TOOLKIT  = $10
+000000r 2               E_DESKTOP   = $CC90   ; the desktop (BASIC: CALL DESKTOP)
+000000r 2               EN_DESKTOP  = $11
+000000r 2               E_MUSIC     = $CCD0   ; the music engine: LDA #function, LDX #arg, JSR
+000000r 2               EN_MUSIC    = $19
+000000r 2               E_MUSICB    = $CCD8   ; the music engine from BASIC (mailbox $CCDE)
+000000r 2               EN_MUSICB   = $1A
+000000r 2               E_RESUME    = $CC98   ; the desktop: back from a program (G after F1)
+000000r 2               EN_RESUME   = $12
+000000r 2               E_LAUNCH    = $CCA0   ; the desktop: calls a program, then RESUME
+000000r 2               EN_LAUNCH   = $13
+000000r 2               E_TARGET    = $CCB0   ; the desktop: the program being started
+000000r 2               EN_TARGET   = $15
+000000r 2               E_BANKLD    = $CCB8   ; the desktop: disk LOAD into the launch bank
+000000r 2               EN_BANKLD   = $16
+000000r 2               ; bank map owners
+000000r 2               OWN_FREE    = 0       ; free
+000000r 2               OWN_MAIN    = $FD     ; a main-RAM program (started from the desktop)
+000000r 2               OWN_HAND    = $FE     ; loaded by hand (L ... BB in the monitor)
+000000r 2               OWN_SYSTEM  = $FF     ; reserved: zones and banks that are never handed out
+000000r 2               ; system calls in the ROM
+000000r 2               BALLOC      = $FFB0   ; A = owner, X = how many banks (next to each other), Y = 0 pr
+000000r 2               BFREE       = $FFB3   ; A = bank
+000000r 2               BFREEALL    = $FFB6   ; A = owner
+000000r 2               BCLAIM      = $FFB9   ; A = owner, X = bank
+000000r 2               VFIND       = $FFBC   ; X/Y = address of a name (low, high; up to 8 characters, endi
+000000r 2               BOWNER      = $FFBF   ; A = bank
+000000r 2               
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               MONITOR = $FF1F
+000000r 1               
+000000r 1               ; --- memory --------------------------------------------------------------------
+000000r 1               BUF     = $0400         ; text buffer start (page aligned: low byte 0)
+000000r 1               TOP     = $CBF0         ; text buffer end (exclusive)
+000000r 1               STUB    = $CBF0         ; 8 bytes: LDA #bank / STA BANK / JMP warm
+000000r 1               
+000000r 1               SWAPLEN = $CC00         ; RAM swapped with the caller: $0000-$CBFF
+000000r 1               IMAGE   = $0E0000       ; the editor's RAM while away (banks $E0-$EC)
+000000r 1               WORLD   = $0F0000       ; the caller's RAM while editing (banks $F0-$FC)
+000000r 1               
+000000r 1               ; in the editor's own bank, after the code (not swapped, not in EDIT's file)
+000000r 1               INSIDE  = $EFF0         ; INMAGIC while the RAM holds the editor's image
+000000r 1               INMAGIC = $A5
+000000r 1               SAVSP   = $EFF1         ; the caller's stack pointer
+000000r 1               SAVWLO  = $EFF2         ; the caller's warm start (WARMLO/HI)
+000000r 1               SAVWHI  = $EFF3
+000000r 1               SAVCOL  = $EFF4         ; the caller's COLOR
+000000r 1               RETLO   = $EFF5         ; enter's return address
+000000r 1               RETHI   = $EFF6
+000000r 1               OPENREQ = $EFF7         ; 1: started by $E006
+000000r 1               SAVIRQ  = $EFF8         ; the caller's IRQEN, when its handler is in its RAM
+000000r 1               OPENNAME = $EF80        ; the file name for $E006 (up to 40 characters + 0)
+000000r 1               
+000000r 1               GS      = $10           ; 2: gap start = the cursor (text before it: BUF..GS)
+000000r 1               GE      = $12           ; 2: gap end (text after the cursor: GE..TOP)
+000000r 1               TOPPOS  = $14           ; 2: logical position of the first line on screen
+000000r 1               CURLINE = $16           ; 2: cursor line, 0-based
+000000r 1               LEFTCOL = $18           ; first column shown
+000000r 1               WANTCOL = $19           ; column kept while moving up and down
+000000r 1               COL     = $1A           ; cursor column (0-255, saturates)
+000000r 1               CURROW  = $1B           ; cursor row on screen
+000000r 1               P       = $1C           ; 2: pointer
+000000r 1               Q       = $1E           ; 2: pointer
+000000r 1               T       = $20           ; 2: temporary / count
+000000r 1               POS     = $22           ; 2: logical position while drawing
+000000r 1               ROW     = $24
+000000r 1               CNT     = $25
+000000r 1               REDRAW  = $26           ; 0 nothing, 1 cursor line, 2 everything
+000000r 1               MODIFIED = $27          ; nonzero: unsaved changes
+000000r 1               TXTCOL  = $28           ; COLOR for text
+000000r 1               MYBANK  = $29           ; the bank the editor runs in
+000000r 1               NUM     = $2A           ; 2: number to print in decimal
+000000r 1               NZ      = $2C           ; digit printed (leading zero suppression)
+000000r 1               MSG     = $2D           ; 2: message for the status line, 0 = none
+000000r 1               KEY     = $2F
+000000r 1               DP      = $30           ; 2: text pointer while drawing (jumps over the gap)
+000000r 1               
+000000r 1               SIG     = $0300         ; "ED" when the state below is valid
+000000r 1               NAMELEN = $0302
+000000r 1               NAME    = $0310         ; file name (up to 40 characters)
+000000r 1               INLEN   = $0340
+000000r 1               INBUF   = $0350         ; name being typed (up to 40 characters)
+000000r 1               NAMEMAX = 40
+000000r 1               
+000000r 1               CR      = $0D
+000000r 1               LF      = $0A
+000000r 1               ESC     = $1B
+000000r 1               STATUSROW = 24
+000000r 1               TEXTROWS  = 24
+000000r 1               STCOLOR = $70           ; status line: black on light grey
+000000r 1               
+000000r 1               ; --- entry points --------------------------------------------------------------
+000000r 1                       .org $E000
+00E000  1               
+00E000  1  4C 11 E0             jmp cold                ; $E000
+00E003  1  4C 42 E0             jmp warm                ; $E003
+00E006  1  4C 09 E0             jmp open                ; $E006: empty text, then load the file whose
+00E009  1                                               ; name (0-terminated) is at OPENNAME
+00E009  1               
+00E009  1  D8           open:   cld
+00E00A  1  A9 01                lda #1
+00E00C  1  8D F7 EF             sta OPENREQ
+00E00F  1  D0 06                bne cold2
+00E011  1               cold:
+00E011  1  D8                   cld
+00E012  1  A9 00                lda #0
+00E014  1  8D F7 EF             sta OPENREQ
+00E017  1  20 77 E4     cold2:  jsr enter               ; BASIC/the caller's RAM goes to the banks
+00E01A  1               newimage:
+00E01A  1  A2 FF                ldx #$FF
+00E01C  1  9A                   txs
+00E01D  1  AD 20 D0             lda BANK                ; remember where we live
+00E020  1  85 29                sta MYBANK
+00E022  1  AD F4 EF             lda SAVCOL
+00E025  1  85 28                sta TXTCOL
+00E027  1  20 71 E5             jsr clearram            ; the editor's RAM image: $0300-$CBEF = 0
+00E02A  1  20 54 E4             jsr newtext
+00E02D  1  A9 45                lda #'E'
+00E02F  1  8D 00 03             sta SIG
+00E032  1  A9 44                lda #'D'
+00E034  1  8D 01 03             sta SIG+1
+00E037  1  A9 00                lda #0
+00E039  1  8D 02 03             sta NAMELEN
+00E03C  1  20 8C E5             jsr setstub
+00E03F  1  4C 5F E0             jmp start
+00E042  1               
+00E042  1               warm:
+00E042  1  D8                   cld
+00E043  1  20 77 E4             jsr enter               ; swap in the editor's RAM image (text kept)
+00E046  1  A2 FF                ldx #$FF
+00E048  1  9A                   txs
+00E049  1  AD 00 03             lda SIG                 ; state there?
+00E04C  1  C9 45                cmp #'E'
+00E04E  1  D0 CA                bne newimage            ; no: an empty text (already swapped in)
+00E050  1  AD 01 03             lda SIG+1
+00E053  1  C9 44                cmp #'D'
+00E055  1  D0 C3                bne newimage
+00E057  1  AD 20 D0             lda BANK
+00E05A  1  85 29                sta MYBANK
+00E05C  1  20 8C E5             jsr setstub
+00E05F  1               start:
+00E05F  1  A5 28                lda TXTCOL
+00E061  1  8D 21 D0             sta COLOR
+00E064  1  A9 02                lda #2
+00E066  1  8D 00 D0             sta SYSCTL              ; clear the screen
+00E069  1  A9 02                lda #2
+00E06B  1  85 26                sta REDRAW
+00E06D  1  A9 00                lda #0
+00E06F  1  85 2E                sta MSG+1
+00E071  1  AD F7 EF             lda OPENREQ             ; started by $E006: load the file
+00E074  1  F0 1A                beq mainloop
+00E076  1  A9 00                lda #0
+00E078  1  8D F7 EF             sta OPENREQ
+00E07B  1  A2 00                ldx #0
+00E07D  1  BD 80 EF     @n:     lda OPENNAME,x
+00E080  1  F0 08                beq @nd
+00E082  1  9D 50 03             sta INBUF,x
+00E085  1  E8                   inx
+00E086  1  E0 28                cpx #NAMEMAX
+00E088  1  D0 F3                bne @n
+00E08A  1  8E 40 03     @nd:    stx INLEN
+00E08D  1  20 95 E2             jsr doload
+00E090  1               
+00E090  1               ; --- main loop -----------------------------------------------------------------
+00E090  1               mainloop:
+00E090  1  20 26 E7             jsr fixview
+00E093  1  A5 26                lda REDRAW
+00E095  1  F0 0D                beq @status
+00E097  1  C9 01                cmp #1
+00E099  1  F0 06                beq @line
+00E09B  1  20 D7 E7             jsr drawall
+00E09E  1  4C A4 E0             jmp @status
+00E0A1  1  20 F2 E7     @line:  jsr drawcur
+00E0A4  1               @status:
+00E0A4  1  20 97 E8             jsr drawstatus
+00E0A7  1  A9 00                lda #0
+00E0A9  1  85 26                sta REDRAW
+00E0AB  1  A5 1B                lda CURROW              ; put the cursor where it belongs
+00E0AD  1  8D 16 D0             sta CURY
+00E0B0  1  38                   sec
+00E0B1  1  A5 1A                lda COL
+00E0B3  1  E5 18                sbc LEFTCOL
+00E0B5  1  8D 15 D0             sta CURX
+00E0B8  1  20 C7 E0             jsr getkey
+00E0BB  1  85 2F                sta KEY
+00E0BD  1  A9 00                lda #0
+00E0BF  1  85 2E                sta MSG+1               ; a message lasts until the next key
+00E0C1  1  20 DB E0             jsr dokey
+00E0C4  1  4C 90 E0             jmp mainloop
+00E0C7  1               
+00E0C7  1               ; Waits for a key: A = character, or $81-$8A for the extended keys
+00E0C7  1               getkey:
+00E0C7  1  AD 11 D0             lda KBDCR
+00E0CA  1  10 FB                bpl getkey
+00E0CC  1  AD 10 D0             lda KBD
+00E0CF  1  29 7F                and #$7F
+00E0D1  1  D0 07                bne @done
+00E0D3  1  AD 19 D0             lda KBDEXT
+00E0D6  1  F0 EF                beq getkey              ; a real NUL: ignore it
+00E0D8  1  09 80                ora #$80
+00E0DA  1  60           @done:  rts
+00E0DB  1               
+00E0DB  1               dokey:
+00E0DB  1  A5 2F                lda KEY
+00E0DD  1  C9 81                cmp #$81
+00E0DF  1  D0 03                bne :+
+00E0E1  1  4C 08 E2             jmp k_up
+00E0E4  1  C9 82        :       cmp #$82
+00E0E6  1  D0 03                bne :+
+00E0E8  1  4C 0C E2             jmp k_down
+00E0EB  1  C9 83        :       cmp #$83
+00E0ED  1  D0 03                bne :+
+00E0EF  1  4C F0 E1             jmp k_left
+00E0F2  1  C9 84        :       cmp #$84
+00E0F4  1  D0 03                bne :+
+00E0F6  1  4C F6 E1             jmp k_right
+00E0F9  1  C9 85        :       cmp #$85
+00E0FB  1  D0 03                bne :+
+00E0FD  1  4C FC E1             jmp k_home
+00E100  1  C9 86        :       cmp #$86
+00E102  1  D0 03                bne :+
+00E104  1  4C 02 E2             jmp k_end
+00E107  1  C9 87        :       cmp #$87
+00E109  1  D0 03                bne :+
+00E10B  1  4C 10 E2             jmp k_pgup
+00E10E  1  C9 88        :       cmp #$88
+00E110  1  D0 03                bne :+
+00E112  1  4C 1D E2             jmp k_pgdn
+00E115  1  C9 8A        :       cmp #$8A
+00E117  1  D0 03                bne :+
+00E119  1  4C BF E1             jmp k_del
+00E11C  1  C9 0D        :       cmp #CR
+00E11E  1  D0 03                bne :+
+00E120  1  4C 70 E1             jmp k_enter
+00E123  1  C9 08        :       cmp #$08
+00E125  1  D0 03                bne :+
+00E127  1  4C 94 E1             jmp k_bs
+00E12A  1  C9 7F        :       cmp #$7F
+00E12C  1  D0 03                bne :+
+00E12E  1  4C 94 E1             jmp k_bs
+00E131  1  C9 09        :       cmp #$09
+00E133  1  D0 03                bne :+
+00E135  1  4C 7C E1             jmp k_tab
+00E138  1  C9 1B        :       cmp #ESC
+00E13A  1  D0 03                bne :+
+00E13C  1  4C 2A E2             jmp k_exit
+00E13F  1  C9 13        :       cmp #$13                ; Ctrl+S
+00E141  1  D0 03                bne :+
+00E143  1  4C 3F E2             jmp k_save
+00E146  1  C9 0C        :       cmp #$0C                ; Ctrl+L
+00E148  1  D0 03                bne :+
+00E14A  1  4C 86 E2             jmp k_load
+00E14D  1  C9 0E        :       cmp #$0E                ; Ctrl+N
+00E14F  1  D0 03                bne :+
+00E151  1  4C 2D E2             jmp k_new
+00E154  1  C9 20        :       cmp #' '
+00E156  1  90 07                bcc @ignore
+00E158  1  C9 7F                cmp #$7F
+00E15A  1  B0 03                bcs @ignore
+00E15C  1  4C 60 E1             jmp k_char
+00E15F  1               @ignore:
+00E15F  1  60                   rts
+00E160  1               
+00E160  1               ; --- keys ----------------------------------------------------------------------
+00E160  1               k_char:
+00E160  1  A5 2F                lda KEY
+00E162  1  20 20 E4             jsr insert
+00E165  1  B0 08                bcs @full
+00E167  1  A9 01                lda #1                  ; only this line changed
+00E169  1  20 4D E4             jsr wantredraw
+00E16C  1  4C E3 E3             jmp setwant
+00E16F  1  60           @full:  rts
+00E170  1               
+00E170  1               k_enter:
+00E170  1  A9 0D                lda #CR
+00E172  1  20 20 E4             jsr insert
+00E175  1  A9 02                lda #2
+00E177  1  85 26                sta REDRAW
+00E179  1  4C E3 E3             jmp setwant
+00E17C  1               
+00E17C  1               k_tab:                          ; spaces up to the next multiple of 8
+00E17C  1  A9 20                lda #' '
+00E17E  1  20 20 E4             jsr insert
+00E181  1  B0 09                bcs @done
+00E183  1  20 B8 E3             jsr column
+00E186  1  A5 1A                lda COL
+00E188  1  29 07                and #7
+00E18A  1  D0 F0                bne k_tab
+00E18C  1  A9 01        @done:  lda #1
+00E18E  1  20 4D E4             jsr wantredraw
+00E191  1  4C E3 E3             jmp setwant
+00E194  1               
+00E194  1               k_bs:                           ; delete the character before the cursor
+00E194  1  20 65 E3             jsr charbefore
+00E197  1  B0 23                bcs @none
+00E199  1  C9 0D                cmp #CR
+00E19B  1  D0 0E                bne @line
+00E19D  1  A5 16                lda CURLINE             ; joining two lines
+00E19F  1  D0 02                bne :+
+00E1A1  1  C6 17                dec CURLINE+1
+00E1A3  1  C6 16        :       dec CURLINE
+00E1A5  1  A9 02                lda #2
+00E1A7  1  85 26                sta REDRAW
+00E1A9  1  D0 05                bne @dec
+00E1AB  1  A9 01        @line:  lda #1
+00E1AD  1  20 4D E4             jsr wantredraw
+00E1B0  1  A5 10        @dec:   lda GS
+00E1B2  1  D0 02                bne :+
+00E1B4  1  C6 11                dec GS+1
+00E1B6  1  C6 10        :       dec GS
+00E1B8  1  A9 01                lda #1
+00E1BA  1  85 27                sta MODIFIED
+00E1BC  1  4C E3 E3     @none:  jmp setwant
+00E1BF  1               
+00E1BF  1               ; Delete the character after the cursor (GE side)
+00E1BF  1               k_del:
+00E1BF  1  20 C5 E1             jsr delafter
+00E1C2  1  4C E3 E3             jmp setwant
+00E1C5  1               
+00E1C5  1               delafter:
+00E1C5  1  A5 12                lda GE                  ; at the end?
+00E1C7  1  C9 F0                cmp #<TOP
+00E1C9  1  D0 06                bne @go
+00E1CB  1  A5 13                lda GE+1
+00E1CD  1  C9 CB                cmp #>TOP
+00E1CF  1  F0 1E                beq @done
+00E1D1  1  A0 00        @go:    ldy #0
+00E1D3  1  B1 12                lda (GE),y
+00E1D5  1  E6 12                inc GE
+00E1D7  1  D0 02                bne :+
+00E1D9  1  E6 13                inc GE+1
+00E1DB  1  C9 0D        :       cmp #CR
+00E1DD  1  F0 08                beq @all
+00E1DF  1  A9 01                lda #1
+00E1E1  1  20 4D E4             jsr wantredraw
+00E1E4  1  4C EB E1             jmp @mod
+00E1E7  1  A9 02        @all:   lda #2
+00E1E9  1  85 26                sta REDRAW
+00E1EB  1  A9 01        @mod:   lda #1
+00E1ED  1  85 27                sta MODIFIED
+00E1EF  1  60           @done:  rts
+00E1F0  1               
+00E1F0  1               k_left:
+00E1F0  1  20 07 E3             jsr left1
+00E1F3  1  4C E3 E3             jmp setwant
+00E1F6  1               k_right:
+00E1F6  1  20 39 E3             jsr right1
+00E1F9  1  4C E3 E3             jmp setwant
+00E1FC  1               k_home:
+00E1FC  1  20 98 E3             jsr linestart
+00E1FF  1  4C E3 E3             jmp setwant
+00E202  1               k_end:
+00E202  1  20 A8 E3             jsr lineend
+00E205  1  4C E3 E3             jmp setwant
+00E208  1               
+00E208  1               k_up:
+00E208  1  20 EB E3             jsr up1
+00E20B  1  60                   rts
+00E20C  1               k_down:
+00E20C  1  20 FA E3             jsr down1
+00E20F  1  60                   rts
+00E210  1               k_pgup:
+00E210  1  A2 17                ldx #TEXTROWS-1
+00E212  1  8A           @loop:  txa
+00E213  1  48                   pha
+00E214  1  20 EB E3             jsr up1
+00E217  1  68                   pla
+00E218  1  AA                   tax
+00E219  1  CA                   dex
+00E21A  1  D0 F6                bne @loop
+00E21C  1  60                   rts
+00E21D  1               k_pgdn:
+00E21D  1  A2 17                ldx #TEXTROWS-1
+00E21F  1  8A           @loop:  txa
+00E220  1  48                   pha
+00E221  1  20 FA E3             jsr down1
+00E224  1  68                   pla
+00E225  1  AA                   tax
+00E226  1  CA                   dex
+00E227  1  D0 F6                bne @loop
+00E229  1  60                   rts
+00E22A  1               
+00E22A  1               k_exit:
+00E22A  1  4C FF E4             jmp leave               ; back to the caller, its RAM put back
+00E22D  1               
+00E22D  1               k_new:
+00E22D  1  20 EF E2             jsr confirm
+00E230  1  B0 0C                bcs @no
+00E232  1  20 54 E4             jsr newtext
+00E235  1  A9 00                lda #0
+00E237  1  8D 02 03             sta NAMELEN
+00E23A  1  A9 02                lda #2
+00E23C  1  85 26                sta REDRAW
+00E23E  1  60           @no:    rts
+00E23F  1               
+00E23F  1               k_save:
+00E23F  1  A9 FD                lda #<s_saveas
+00E241  1  A2 EA                ldx #>s_saveas
+00E243  1  20 E7 E9             jsr askname
+00E246  1  B0 3D                bcs @no
+00E248  1  20 BF E5             jsr closegap            ; text = BUF .. GS+n, contiguous
+00E24B  1  A9 00                lda #<BUF
+00E24D  1  8D 42 D0             sta DSTART
+00E250  1  A9 04                lda #>BUF
+00E252  1  8D 43 D0             sta DSTART+1
+00E255  1  18                   clc
+00E256  1  A5 10                lda GS
+00E258  1  65 20                adc T
+00E25A  1  8D 44 D0             sta DEND
+00E25D  1  A5 11                lda GS+1
+00E25F  1  65 21                adc T+1
+00E261  1  8D 45 D0             sta DEND+1
+00E264  1  20 91 EA             jsr setdname
+00E267  1  A9 02                lda #2
+00E269  1  8D 40 D0             sta DCMD
+00E26C  1  20 DF E5             jsr opengap             ; put the gap back at the cursor
+00E26F  1  AD 41 D0             lda DSTAT
+00E272  1  D0 0E                bne @err
+00E274  1  20 A2 EA             jsr usename
+00E277  1  A9 00                lda #0
+00E279  1  85 27                sta MODIFIED
+00E27B  1  A9 10                lda #<s_saved
+00E27D  1  A2 EB                ldx #>s_saved
+00E27F  1  4C AB E9             jmp setmsg
+00E282  1  4C B0 E9     @err:   jmp diskmsg
+00E285  1  60           @no:    rts
+00E286  1               
+00E286  1               k_load:
+00E286  1  20 EF E2             jsr confirm
+00E289  1  B0 09                bcs klno
+00E28B  1  A9 08                lda #<s_load
+00E28D  1  A2 EB                ldx #>s_load
+00E28F  1  20 E7 E9             jsr askname
+00E292  1  90 01                bcc doload
+00E294  1  60           klno:   rts
+00E295  1  A9 00        doload: lda #<BUF               ; (INBUF/INLEN = the name)
+00E297  1  8D 42 D0             sta DSTART
+00E29A  1  A9 04                lda #>BUF
+00E29C  1  8D 43 D0             sta DSTART+1
+00E29F  1  A9 F0                lda #<TOP
+00E2A1  1  8D 44 D0             sta DEND
+00E2A4  1  A9 CB                lda #>TOP
+00E2A6  1  8D 45 D0             sta DEND+1
+00E2A9  1  20 91 EA             jsr setdname
+00E2AC  1  A9 03                lda #3                  ; load at BUF, must fit below TOP
+00E2AE  1  8D 40 D0             sta DCMD
+00E2B1  1  AD 41 D0             lda DSTAT
+00E2B4  1  D0 2A                bne @err
+00E2B6  1  20 A2 EA             jsr usename
+00E2B9  1  AD 44 D0             lda DEND                ; the text is BUF..DEND
+00E2BC  1  85 10                sta GS
+00E2BE  1  AD 45 D0             lda DEND+1
+00E2C1  1  85 11                sta GS+1
+00E2C3  1  20 94 E6             jsr fixlf               ; LF / CR LF -> CR
+00E2C6  1  A9 F0                lda #<TOP
+00E2C8  1  85 12                sta GE
+00E2CA  1  A9 CB                lda #>TOP
+00E2CC  1  85 13                sta GE+1
+00E2CE  1  20 F2 E5             jsr gaptostart          ; cursor at the start of the text
+00E2D1  1  A9 00                lda #0
+00E2D3  1  85 27                sta MODIFIED
+00E2D5  1  A9 02                lda #2
+00E2D7  1  85 26                sta REDRAW
+00E2D9  1  A9 17                lda #<s_loaded
+00E2DB  1  A2 EB                ldx #>s_loaded
+00E2DD  1  4C AB E9             jmp setmsg
+00E2E0  1  C9 01        @err:   cmp #1
+00E2E2  1  D0 07                bne :+
+00E2E4  1  A9 1F                lda #<s_notfound
+00E2E6  1  A2 EB                ldx #>s_notfound
+00E2E8  1  4C AB E9             jmp setmsg
+00E2EB  1  4C B0 E9     :       jmp diskmsg
+00E2EE  1  60           @no:    rts
+00E2EF  1               
+00E2EF  1               ; With unsaved changes, asks for Y; carry set = do not go on
+00E2EF  1               confirm:
+00E2EF  1  A5 27                lda MODIFIED
+00E2F1  1  F0 10                beq @ok
+00E2F3  1  A9 6A                lda #<s_discard
+00E2F5  1  A2 EB                ldx #>s_discard
+00E2F7  1  20 B7 E9             jsr prompt
+00E2FA  1  20 C7 E0             jsr getkey
+00E2FD  1  29 DF                and #$DF
+00E2FF  1  C9 59                cmp #'Y'
+00E301  1  D0 02                bne @no
+00E303  1  18           @ok:    clc
+00E304  1  60                   rts
+00E305  1  38           @no:    sec
+00E306  1  60                   rts
+00E307  1               
+00E307  1               ; --- cursor movement -----------------------------------------------------------
+00E307  1               
+00E307  1               ; One character left (carry set if at the start); A = the character passed
+00E307  1               left1:
+00E307  1  A5 10                lda GS
+00E309  1  D0 06                bne :+
+00E30B  1  A5 11                lda GS+1
+00E30D  1  C9 04                cmp #>BUF
+00E30F  1  F0 26                beq @start
+00E311  1  A5 10        :       lda GS
+00E313  1  D0 02                bne :+
+00E315  1  C6 11                dec GS+1
+00E317  1  C6 10        :       dec GS
+00E319  1  A5 12                lda GE
+00E31B  1  D0 02                bne :+
+00E31D  1  C6 13                dec GE+1
+00E31F  1  C6 12        :       dec GE
+00E321  1  A0 00                ldy #0
+00E323  1  B1 10                lda (GS),y
+00E325  1  91 12                sta (GE),y
+00E327  1  C9 0D                cmp #CR
+00E329  1  D0 0A                bne @done
+00E32B  1  A5 16                lda CURLINE
+00E32D  1  D0 02                bne :+
+00E32F  1  C6 17                dec CURLINE+1
+00E331  1  C6 16        :       dec CURLINE
+00E333  1  A9 0D                lda #CR
+00E335  1  18           @done:  clc
+00E336  1  60                   rts
+00E337  1  38           @start: sec
+00E338  1  60                   rts
+00E339  1               
+00E339  1               ; One character right (carry set if at the end); A = the character passed
+00E339  1               right1:
+00E339  1  A5 12                lda GE
+00E33B  1  C9 F0                cmp #<TOP
+00E33D  1  D0 06                bne @go
+00E33F  1  A5 13                lda GE+1
+00E341  1  C9 CB                cmp #>TOP
+00E343  1  F0 1E                beq @end
+00E345  1  A0 00        @go:    ldy #0
+00E347  1  B1 12                lda (GE),y
+00E349  1  91 10                sta (GS),y
+00E34B  1  E6 10                inc GS
+00E34D  1  D0 02                bne :+
+00E34F  1  E6 11                inc GS+1
+00E351  1  E6 12        :       inc GE
+00E353  1  D0 02                bne :+
+00E355  1  E6 13                inc GE+1
+00E357  1  C9 0D        :       cmp #CR
+00E359  1  D0 06                bne @done
+00E35B  1  E6 16                inc CURLINE
+00E35D  1  D0 02                bne @done
+00E35F  1  E6 17                inc CURLINE+1
+00E361  1  18           @done:  clc
+00E362  1  60                   rts
+00E363  1  38           @end:   sec
+00E364  1  60                   rts
+00E365  1               
+00E365  1               ; Character before / after the cursor; carry set if there is none
+00E365  1               charbefore:
+00E365  1  A5 10                lda GS
+00E367  1  D0 06                bne :+
+00E369  1  A5 11                lda GS+1
+00E36B  1  C9 04                cmp #>BUF
+00E36D  1  F0 13                beq @none
+00E36F  1  A5 10        :       lda GS
+00E371  1  38                   sec
+00E372  1  E9 01                sbc #1
+00E374  1  85 1C                sta P
+00E376  1  A5 11                lda GS+1
+00E378  1  E9 00                sbc #0
+00E37A  1  85 1D                sta P+1
+00E37C  1  A0 00                ldy #0
+00E37E  1  B1 1C                lda (P),y
+00E380  1  18                   clc
+00E381  1  60                   rts
+00E382  1  38           @none:  sec
+00E383  1  60                   rts
+00E384  1               
+00E384  1               charafter:
+00E384  1  A5 12                lda GE
+00E386  1  C9 F0                cmp #<TOP
+00E388  1  D0 06                bne @go
+00E38A  1  A5 13                lda GE+1
+00E38C  1  C9 CB                cmp #>TOP
+00E38E  1  F0 06                beq @none
+00E390  1  A0 00        @go:    ldy #0
+00E392  1  B1 12                lda (GE),y
+00E394  1  18                   clc
+00E395  1  60                   rts
+00E396  1  38           @none:  sec
+00E397  1  60                   rts
+00E398  1               
+00E398  1               linestart:
+00E398  1  20 65 E3             jsr charbefore
+00E39B  1  B0 0A                bcs @done
+00E39D  1  C9 0D                cmp #CR
+00E39F  1  F0 06                beq @done
+00E3A1  1  20 07 E3             jsr left1
+00E3A4  1  4C 98 E3             jmp linestart
+00E3A7  1  60           @done:  rts
+00E3A8  1               
+00E3A8  1               lineend:
+00E3A8  1  20 84 E3             jsr charafter
+00E3AB  1  B0 0A                bcs @done
+00E3AD  1  C9 0D                cmp #CR
+00E3AF  1  F0 06                beq @done
+00E3B1  1  20 39 E3             jsr right1
+00E3B4  1  4C A8 E3             jmp lineend
+00E3B7  1  60           @done:  rts
+00E3B8  1               
+00E3B8  1               ; COL = cursor column (characters since the last CR, at most 255)
+00E3B8  1               column:
+00E3B8  1  A5 10                lda GS
+00E3BA  1  85 1C                sta P
+00E3BC  1  A5 11                lda GS+1
+00E3BE  1  85 1D                sta P+1
+00E3C0  1  A2 00                ldx #0
+00E3C2  1  A5 1C        @loop:  lda P                   ; at BUF?
+00E3C4  1  D0 06                bne :+
+00E3C6  1  A5 1D                lda P+1
+00E3C8  1  C9 04                cmp #>BUF
+00E3CA  1  F0 14                beq @done
+00E3CC  1  A5 1C        :       lda P
+00E3CE  1  D0 02                bne :+
+00E3D0  1  C6 1D                dec P+1
+00E3D2  1  C6 1C        :       dec P
+00E3D4  1  A0 00                ldy #0
+00E3D6  1  B1 1C                lda (P),y
+00E3D8  1  C9 0D                cmp #CR
+00E3DA  1  F0 04                beq @done
+00E3DC  1  E8                   inx
+00E3DD  1  D0 E3                bne @loop
+00E3DF  1  CA                   dex                     ; 255 at most
+00E3E0  1  86 1A        @done:  stx COL
+00E3E2  1  60                   rts
+00E3E3  1               
+00E3E3  1               setwant:
+00E3E3  1  20 B8 E3             jsr column
+00E3E6  1  A5 1A                lda COL
+00E3E8  1  85 19                sta WANTCOL
+00E3EA  1  60                   rts
+00E3EB  1               
+00E3EB  1               ; Up one line, to WANTCOL or the end of that line
+00E3EB  1               up1:
+00E3EB  1  20 98 E3             jsr linestart
+00E3EE  1  20 07 E3             jsr left1               ; onto the previous line's CR
+00E3F1  1  B0 06                bcs @top                ; first line: stay at its start
+00E3F3  1  20 98 E3             jsr linestart
+00E3F6  1  4C 06 E4             jmp towant
+00E3F9  1  60           @top:   rts
+00E3FA  1               
+00E3FA  1               down1:
+00E3FA  1  20 A8 E3             jsr lineend
+00E3FD  1  20 39 E3             jsr right1              ; past the CR
+00E400  1  B0 03                bcs @end
+00E402  1  4C 06 E4             jmp towant
+00E405  1  60           @end:   rts
+00E406  1               
+00E406  1               ; Right, up to WANTCOL columns, not past the end of the line
+00E406  1               towant:
+00E406  1  A6 19                ldx WANTCOL
+00E408  1  F0 15                beq @done
+00E40A  1  8A           @loop:  txa
+00E40B  1  48                   pha
+00E40C  1  20 84 E3             jsr charafter
+00E40F  1  B0 0D                bcs @stop
+00E411  1  C9 0D                cmp #CR
+00E413  1  F0 09                beq @stop
+00E415  1  20 39 E3             jsr right1
+00E418  1  68                   pla
+00E419  1  AA                   tax
+00E41A  1  CA                   dex
+00E41B  1  D0 ED                bne @loop
+00E41D  1  60                   rts
+00E41E  1  68           @stop:  pla
+00E41F  1  60           @done:  rts
+00E420  1               
+00E420  1               ; --- editing -------------------------------------------------------------------
+00E420  1               
+00E420  1               ; Inserts A at the cursor; carry set (and a beep) if the buffer is full
+00E420  1               insert:
+00E420  1  AA                   tax
+00E421  1  A5 10                lda GS
+00E423  1  C5 12                cmp GE
+00E425  1  D0 0B                bne @room
+00E427  1  A5 11                lda GS+1
+00E429  1  C5 13                cmp GE+1
+00E42B  1  D0 05                bne @room
+00E42D  1  8D 00 D1             sta BEEP
+00E430  1  38                   sec
+00E431  1  60                   rts
+00E432  1  8A           @room:  txa
+00E433  1  A0 00                ldy #0
+00E435  1  91 10                sta (GS),y
+00E437  1  E6 10                inc GS
+00E439  1  D0 02                bne :+
+00E43B  1  E6 11                inc GS+1
+00E43D  1  C9 0D        :       cmp #CR
+00E43F  1  D0 06                bne :+
+00E441  1  E6 16                inc CURLINE
+00E443  1  D0 02                bne :+
+00E445  1  E6 17                inc CURLINE+1
+00E447  1  A9 01        :       lda #1
+00E449  1  85 27                sta MODIFIED
+00E44B  1  18                   clc
+00E44C  1  60                   rts
+00E44D  1               
+00E44D  1               ; REDRAW = max(REDRAW, A)
+00E44D  1               wantredraw:
+00E44D  1  C5 26                cmp REDRAW
+00E44F  1  90 02                bcc @keep
+00E451  1  85 26                sta REDRAW
+00E453  1  60           @keep:  rts
+00E454  1               
+00E454  1               ; Empty text, cursor at the start
+00E454  1               newtext:
+00E454  1  A9 00                lda #<BUF
+00E456  1  85 10                sta GS
+00E458  1  A9 04                lda #>BUF
+00E45A  1  85 11                sta GS+1
+00E45C  1  A9 F0                lda #<TOP
+00E45E  1  85 12                sta GE
+00E460  1  A9 CB                lda #>TOP
+00E462  1  85 13                sta GE+1
+00E464  1  A9 00                lda #0
+00E466  1  85 14                sta TOPPOS
+00E468  1  85 15                sta TOPPOS+1
+00E46A  1  85 16                sta CURLINE
+00E46C  1  85 17                sta CURLINE+1
+00E46E  1  85 18                sta LEFTCOL
+00E470  1  85 19                sta WANTCOL
+00E472  1  85 1A                sta COL
+00E474  1  85 27                sta MODIFIED
+00E476  1  60                   rts
+00E477  1               
+00E477  1               ; --- swapping the RAM ----------------------------------------------------------
+00E477  1               ; The editor and the program that called it (BASIC, the monitor...) each have
+00E477  1               ; their own copy of the fixed RAM $0000-$CBFF, kept in banks by DMA:
+00E477  1               ;   WORLD  ($F0000, banks $F0-$FC)  the caller's RAM while the editor runs
+00E477  1               ;   IMAGE  ($E0000, banks $E0-$EC)  the editor's RAM (text, state) meanwhile
+00E477  1               ; Entering saves the caller's RAM to WORLD and (warm start) copies IMAGE in;
+00E477  1               ; Esc does the opposite and returns to the caller with RTS, on its own stack.
+00E477  1               ; INSIDE (in the editor's bank, not in the swapped RAM) says that the RAM
+00E477  1               ; holds the editor's image: after F1, G (or E003R) just carries on.
+00E477  1               
+00E477  1               ; Copies 9 bytes from a table to the DMA registers and starts a COPY. Inline
+00E477  1               ; (a macro, not a subroutine): the copy may replace the stack page.
+00E477  1               .macro  DMACOPY tbl
+00E477  1                       .local @l
+00E477  1                       ldx #8
+00E477  1               @l:     lda tbl,x
+00E477  1                       sta DMASRC,x
+00E477  1                       dex
+00E477  1                       bpl @l
+00E477  1                       lda #1
+00E477  1                       sta DMACMD
+00E477  1               .endmacro
+00E477  1               
+00E477  1               ; Called first by cold and warm (JSR: the return address is on the caller's
+00E477  1               ; stack, which is saved with the rest; we come back to it only if nothing was
+00E477  1               ; swapped yet, or before the swap replaces it)
+00E477  1               enter:
+00E477  1  AD 20 D0             lda BANK                ; the editor must not run from a bank the
+00E47A  1  C9 E0                cmp #$E0                ; swap uses ($E0-$FF)
+00E47C  1  90 08                bcc @bankok
+00E47E  1  68                   pla                     ; refused: beep and return to the caller
+00E47F  1  68                   pla
+00E480  1  A9 01                lda #1
+00E482  1  8D 00 D1             sta BEEP
+00E485  1  60                   rts
+00E486  1               @bankok:
+00E486  1  AD F0 EF             lda INSIDE              ; the RAM already holds the editor's image?
+00E489  1  C9 A5                cmp #INMAGIC
+00E48B  1  D0 0F                bne @swap
+00E48D  1  AD 00 03             lda SIG                 ; ...and it still looks like it
+00E490  1  C9 45                cmp #'E'
+00E492  1  D0 08                bne @swap
+00E494  1  AD 01 03             lda SIG+1
+00E497  1  C9 44                cmp #'D'
+00E499  1  D0 01                bne @swap
+00E49B  1  60                   rts                     ; yes: nothing to swap
+00E49C  1  68           @swap:  pla                     ; our return address, kept in the bank: the
+00E49D  1  8D F5 EF             sta RETLO               ; stack page is about to change
+00E4A0  1  68                   pla
+00E4A1  1  8D F6 EF             sta RETHI
+00E4A4  1  BA                   tsx                     ; the caller's stack pointer (after its JSR)
+00E4A5  1  8E F1 EF             stx SAVSP
+00E4A8  1  AD 02 D0             lda WARMLO              ; the caller's warm start (G), put back by Esc
+00E4AB  1  8D F2 EF             sta SAVWLO
+00E4AE  1  AD 03 D0             lda WARMHI
+00E4B1  1  8D F3 EF             sta SAVWHI
+00E4B4  1  AD 21 D0             lda COLOR
+00E4B7  1  8D F4 EF             sta SAVCOL
+00E4BA  1  A9 00                lda #0                  ; an interrupt handler in the caller's RAM is
+00E4BC  1  8D F8 EF             sta SAVIRQ              ; turned off while it is swapped out (one in
+00E4BF  1  AD 0B D0             lda IRQVEC+1            ; a bank keeps running)
+00E4C2  1  C9 E0                cmp #$E0
+00E4C4  1  B0 0B                bcs @irqok
+00E4C6  1  AD 07 D0             lda IRQEN
+00E4C9  1  8D F8 EF             sta SAVIRQ
+00E4CC  1  A9 00                lda #0
+00E4CE  1  8D 07 D0             sta IRQEN
+00E4D1  1               @irqok:
+00E4D1  1  A2 08 BD 4D          DMACOPY d_save          ; caller's RAM -> WORLD
+00E4D5  1  E5 9D 10 D2  
+00E4D9  1  CA 10 F7 A9  
+00E4E1  1  A2 08 BD 56          DMACOPY d_load          ; IMAGE -> RAM (cold clears it afterwards)
+00E4E5  1  E5 9D 10 D2  
+00E4E9  1  CA 10 F7 A9  
+00E4F1  1  A9 A5                lda #INMAGIC
+00E4F3  1  8D F0 EF             sta INSIDE
+00E4F6  1  AD F6 EF             lda RETHI               ; return (to cold or warm, which reset the
+00E4F9  1  48                   pha                     ; stack anyway)
+00E4FA  1  AD F5 EF             lda RETLO
+00E4FD  1  48                   pha
+00E4FE  1  60                   rts
+00E4FF  1               
+00E4FF  1               ; Esc: the editor's RAM back to IMAGE, the caller's RAM back, RTS to it.
+00E4FF  1               ; Nothing in the zero page may be used after the second copy.
+00E4FF  1               leave:
+00E4FF  1  A9 02                lda #2
+00E501  1  8D 00 D0             sta SYSCTL              ; clear the screen
+00E504  1  A2 08 BD 5F          DMACOPY d_keep          ; RAM -> IMAGE
+00E508  1  E5 9D 10 D2  
+00E50C  1  CA 10 F7 A9  
+00E514  1  A2 08 BD 68          DMACOPY d_back          ; WORLD -> RAM
+00E518  1  E5 9D 10 D2  
+00E51C  1  CA 10 F7 A9  
+00E524  1  AD 0B D0             lda IRQVEC+1            ; a handler in the RAM: the caller's again
+00E527  1  C9 E0                cmp #$E0
+00E529  1  B0 06                bcs @irqok
+00E52B  1  AD F8 EF             lda SAVIRQ
+00E52E  1  8D 07 D0             sta IRQEN
+00E531  1  A9 00        @irqok: lda #0
+00E533  1  8D F0 EF             sta INSIDE
+00E536  1  AD F2 EF             lda SAVWLO
+00E539  1  8D 02 D0             sta WARMLO
+00E53C  1  AD F3 EF             lda SAVWHI
+00E53F  1  8D 03 D0             sta WARMHI
+00E542  1  AD F4 EF             lda SAVCOL
+00E545  1  8D 21 D0             sta COLOR
+00E548  1  AE F1 EF             ldx SAVSP
+00E54B  1  9A                   txs
+00E54C  1  60                   rts                     ; to the caller (CALL in BASIC, R, G...)
+00E54D  1               
+00E54D  1               ; DMA descriptors: source (3 bytes), destination (3), length (3)
+00E54D  1  00 00 FF 00  d_save: .byte $00,$00,$FF, <WORLD,>WORLD,^WORLD, <SWAPLEN,>SWAPLEN,0
+00E551  1  00 0F 00 CC  
+00E555  1  00           
+00E556  1  00 00 0E 00  d_load: .byte <IMAGE,>IMAGE,^IMAGE, $00,$00,$FF, <SWAPLEN,>SWAPLEN,0
+00E55A  1  00 FF 00 CC  
+00E55E  1  00           
+00E55F  1  00 00 FF 00  d_keep: .byte $00,$00,$FF, <IMAGE,>IMAGE,^IMAGE, <SWAPLEN,>SWAPLEN,0
+00E563  1  00 0E 00 CC  
+00E567  1  00           
+00E568  1  00 00 0F 00  d_back: .byte <WORLD,>WORLD,^WORLD, $00,$00,$FF, <SWAPLEN,>SWAPLEN,0
+00E56C  1  00 FF 00 CC  
+00E570  1  00           
+00E571  1               
+00E571  1               clearram:
+00E571  1  A9 00                lda #<$0300
+00E573  1  85 1C                sta P
+00E575  1  A9 03                lda #>$0300
+00E577  1  85 1D                sta P+1
+00E579  1  A9 00                lda #0
+00E57B  1  A8                   tay
+00E57C  1  91 1C        @loop:  sta (P),y
+00E57E  1  C8                   iny
+00E57F  1  D0 FB                bne @loop
+00E581  1  E6 1D                inc P+1
+00E583  1  A6 1D                ldx P+1
+00E585  1  E0 CB                cpx #>TOP               ; up to $CBFF: the stub is written afterwards
+00E587  1  90 F3                bcc @loop
+00E589  1  F0 F1                beq @loop
+00E58B  1  60                   rts
+00E58C  1               
+00E58C  1               ; G -> this bank, warm start
+00E58C  1               setstub:
+00E58C  1  A9 A9                lda #$A9                ; LDA #bank
+00E58E  1  8D F0 CB             sta STUB
+00E591  1  A5 29                lda MYBANK
+00E593  1  8D F1 CB             sta STUB+1
+00E596  1  A9 8D                lda #$8D                ; STA BANK
+00E598  1  8D F2 CB             sta STUB+2
+00E59B  1  A9 20                lda #<BANK
+00E59D  1  8D F3 CB             sta STUB+3
+00E5A0  1  A9 D0                lda #>BANK
+00E5A2  1  8D F4 CB             sta STUB+4
+00E5A5  1  A9 4C                lda #$4C                ; JMP warm
+00E5A7  1  8D F5 CB             sta STUB+5
+00E5AA  1  A9 42                lda #<warm
+00E5AC  1  8D F6 CB             sta STUB+6
+00E5AF  1  A9 E0                lda #>warm
+00E5B1  1  8D F7 CB             sta STUB+7
+00E5B4  1  A9 F0                lda #<STUB
+00E5B6  1  8D 02 D0             sta WARMLO
+00E5B9  1  A9 CB                lda #>STUB
+00E5BB  1  8D 03 D0             sta WARMHI
+00E5BE  1  60                   rts
+00E5BF  1               
+00E5BF  1               ; Moves the text after the gap down to GS: the text becomes BUF..GS+T
+00E5BF  1               ; (T = its length). The cursor stays logically at GS.
+00E5BF  1               closegap:
+00E5BF  1  38                   sec
+00E5C0  1  A9 F0                lda #<TOP
+00E5C2  1  E5 12                sbc GE
+00E5C4  1  85 20                sta T
+00E5C6  1  A9 CB                lda #>TOP
+00E5C8  1  E5 13                sbc GE+1
+00E5CA  1  85 21                sta T+1
+00E5CC  1  A5 12                lda GE                  ; from GE
+00E5CE  1  85 1E                sta Q
+00E5D0  1  A5 13                lda GE+1
+00E5D2  1  85 1F                sta Q+1
+00E5D4  1  A5 10                lda GS                  ; to GS
+00E5D6  1  85 1C                sta P
+00E5D8  1  A5 11                lda GS+1
+00E5DA  1  85 1D                sta P+1
+00E5DC  1  4C 2E E6             jmp copyup              ; forward copy (destination is lower)
+00E5DF  1               
+00E5DF  1               ; Puts it back: GS..GS+T moves to GE..TOP
+00E5DF  1               opengap:
+00E5DF  1  A5 10                lda GS
+00E5E1  1  85 1E                sta Q
+00E5E3  1  A5 11                lda GS+1
+00E5E5  1  85 1F                sta Q+1
+00E5E7  1  A5 12                lda GE
+00E5E9  1  85 1C                sta P
+00E5EB  1  A5 13                lda GE+1
+00E5ED  1  85 1D                sta P+1
+00E5EF  1  4C 4F E6             jmp copydown            ; backward copy (destination is higher)
+00E5F2  1               
+00E5F2  1               ; After a load: text BUF..GS, gap GS..TOP. Moves the text to the top, so
+00E5F2  1               ; the cursor is at the start: GE = TOP - length, GS = BUF.
+00E5F2  1               gaptostart:
+00E5F2  1  38                   sec
+00E5F3  1  A5 10                lda GS
+00E5F5  1  E9 00                sbc #<BUF
+00E5F7  1  85 20                sta T
+00E5F9  1  A5 11                lda GS+1
+00E5FB  1  E9 04                sbc #>BUF
+00E5FD  1  85 21                sta T+1
+00E5FF  1  38                   sec
+00E600  1  A9 F0                lda #<TOP
+00E602  1  E5 20                sbc T
+00E604  1  85 12                sta GE
+00E606  1  85 1C                sta P
+00E608  1  A9 CB                lda #>TOP
+00E60A  1  E5 21                sbc T+1
+00E60C  1  85 13                sta GE+1
+00E60E  1  85 1D                sta P+1
+00E610  1  A9 00                lda #<BUF
+00E612  1  85 1E                sta Q
+00E614  1  85 10                sta GS
+00E616  1  A9 04                lda #>BUF
+00E618  1  85 1F                sta Q+1
+00E61A  1  85 11                sta GS+1
+00E61C  1  20 4F E6             jsr copydown
+00E61F  1  A9 00                lda #0
+00E621  1  85 16                sta CURLINE
+00E623  1  85 17                sta CURLINE+1
+00E625  1  85 14                sta TOPPOS
+00E627  1  85 15                sta TOPPOS+1
+00E629  1  85 18                sta LEFTCOL
+00E62B  1  85 19                sta WANTCOL
+00E62D  1  60                   rts
+00E62E  1               
+00E62E  1               ; Copies T bytes from (Q) to (P), lowest address first (P < Q)
+00E62E  1               copyup:
+00E62E  1  A0 00                ldy #0
+00E630  1  A6 21                ldx T+1
+00E632  1  F0 0E                beq @last
+00E634  1  B1 1E        @page:  lda (Q),y
+00E636  1  91 1C                sta (P),y
+00E638  1  C8                   iny
+00E639  1  D0 F9                bne @page
+00E63B  1  E6 1F                inc Q+1
+00E63D  1  E6 1D                inc P+1
+00E63F  1  CA                   dex
+00E640  1  D0 F2                bne @page
+00E642  1  A6 20        @last:  ldx T
+00E644  1  F0 08                beq @done
+00E646  1  B1 1E        @byte:  lda (Q),y
+00E648  1  91 1C                sta (P),y
+00E64A  1  C8                   iny
+00E64B  1  CA                   dex
+00E64C  1  D0 F8                bne @byte
+00E64E  1  60           @done:  rts
+00E64F  1               
+00E64F  1               ; Copies T bytes from (Q) to (P), highest address first (P > Q)
+00E64F  1               copydown:
+00E64F  1  A5 20                lda T                   ; nothing to do?
+00E651  1  05 21                ora T+1
+00E653  1  F0 3E                beq @done
+00E655  1  18                   clc                     ; point at the last byte of each block
+00E656  1  A5 1E                lda Q
+00E658  1  65 20                adc T
+00E65A  1  85 1E                sta Q
+00E65C  1  A5 1F                lda Q+1
+00E65E  1  65 21                adc T+1
+00E660  1  85 1F                sta Q+1
+00E662  1  18                   clc
+00E663  1  A5 1C                lda P
+00E665  1  65 20                adc T
+00E667  1  85 1C                sta P
+00E669  1  A5 1D                lda P+1
+00E66B  1  65 21                adc T+1
+00E66D  1  85 1D                sta P+1
+00E66F  1  A5 1E        @loop:  lda Q
+00E671  1  D0 02                bne :+
+00E673  1  C6 1F                dec Q+1
+00E675  1  C6 1E        :       dec Q
+00E677  1  A5 1C                lda P
+00E679  1  D0 02                bne :+
+00E67B  1  C6 1D                dec P+1
+00E67D  1  C6 1C        :       dec P
+00E67F  1  A0 00                ldy #0
+00E681  1  B1 1E                lda (Q),y
+00E683  1  91 1C                sta (P),y
+00E685  1  A5 20                lda T
+00E687  1  D0 02                bne :+
+00E689  1  C6 21                dec T+1
+00E68B  1  C6 20        :       dec T
+00E68D  1  A5 20                lda T
+00E68F  1  05 21                ora T+1
+00E691  1  D0 DC                bne @loop
+00E693  1  60           @done:  rts
+00E694  1               
+00E694  1               ; In BUF..GS: CR LF -> CR, LF -> CR (the text gets shorter, GS moves down)
+00E694  1               fixlf:
+00E694  1  A9 00                lda #<BUF
+00E696  1  85 1C                sta P                   ; read
+00E698  1  85 1E                sta Q                   ; write
+00E69A  1  A9 04                lda #>BUF
+00E69C  1  85 1D                sta P+1
+00E69E  1  85 1F                sta Q+1
+00E6A0  1  A9 00                lda #0
+00E6A2  1  85 2F                sta KEY                 ; previous character
+00E6A4  1  A5 1C        @loop:  lda P
+00E6A6  1  C5 10                cmp GS
+00E6A8  1  D0 06                bne @go
+00E6AA  1  A5 1D                lda P+1
+00E6AC  1  C5 11                cmp GS+1
+00E6AE  1  F0 25                beq @end
+00E6B0  1  A0 00        @go:    ldy #0
+00E6B2  1  B1 1C                lda (P),y
+00E6B4  1  E6 1C                inc P
+00E6B6  1  D0 02                bne :+
+00E6B8  1  E6 1D                inc P+1
+00E6BA  1  C9 0A        :       cmp #LF
+00E6BC  1  D0 08                bne @store
+00E6BE  1  A6 2F                ldx KEY                 ; LF after CR: drop it
+00E6C0  1  E0 0D                cpx #CR
+00E6C2  1  F0 0C                beq @next
+00E6C4  1  A9 0D                lda #CR
+00E6C6  1  A0 00        @store: ldy #0
+00E6C8  1  91 1E                sta (Q),y
+00E6CA  1  E6 1E                inc Q
+00E6CC  1  D0 02                bne :+
+00E6CE  1  E6 1F                inc Q+1
+00E6D0  1               :
+00E6D0  1  85 2F        @next:  sta KEY
+00E6D2  1  4C A4 E6             jmp @loop
+00E6D5  1  A5 1E        @end:   lda Q
+00E6D7  1  85 10                sta GS
+00E6D9  1  A5 1F                lda Q+1
+00E6DB  1  85 11                sta GS+1
+00E6DD  1  60                   rts
+00E6DE  1               
+00E6DE  1               ; --- screen --------------------------------------------------------------------
+00E6DE  1               
+00E6DE  1               ; Logical position (POS) -> character in A, carry set past the end
+00E6DE  1               getc:
+00E6DE  1  A5 22                lda POS
+00E6E0  1  85 1C                sta P
+00E6E2  1  18                   clc
+00E6E3  1  A5 23                lda POS+1
+00E6E5  1  69 04                adc #>BUF
+00E6E7  1  85 1D                sta P+1                 ; P = BUF + POS
+00E6E9  1  A5 1C                lda P
+00E6EB  1  C5 10                cmp GS
+00E6ED  1  A5 1D                lda P+1
+00E6EF  1  E5 11                sbc GS+1
+00E6F1  1  90 24                bcc @read               ; before the gap
+00E6F3  1  38                   sec                     ; after it: P = GE + (P - GS)
+00E6F4  1  A5 1C                lda P
+00E6F6  1  E5 10                sbc GS
+00E6F8  1  85 20                sta T
+00E6FA  1  A5 1D                lda P+1
+00E6FC  1  E5 11                sbc GS+1
+00E6FE  1  85 21                sta T+1
+00E700  1  18                   clc
+00E701  1  A5 20                lda T
+00E703  1  65 12                adc GE
+00E705  1  85 1C                sta P
+00E707  1  A5 21                lda T+1
+00E709  1  65 13                adc GE+1
+00E70B  1  85 1D                sta P+1
+00E70D  1  A5 1C                lda P
+00E70F  1  C9 F0                cmp #<TOP
+00E711  1  A5 1D                lda P+1
+00E713  1  E9 CB                sbc #>TOP
+00E715  1  B0 06                bcs @end
+00E717  1  A0 00        @read:  ldy #0
+00E719  1  B1 1C                lda (P),y
+00E71B  1  18                   clc
+00E71C  1  60                   rts
+00E71D  1  38           @end:   sec
+00E71E  1  60                   rts
+00E71F  1               
+00E71F  1               incpos:
+00E71F  1  E6 22                inc POS
+00E721  1  D0 02                bne :+
+00E723  1  E6 23                inc POS+1
+00E725  1  60           :       rts
+00E726  1               
+00E726  1               ; Keeps the cursor on screen: TOPPOS, CURROW, LEFTCOL, COL
+00E726  1               fixview:
+00E726  1  20 B8 E3             jsr column
+00E729  1                       ; cursor position (logical) = GS - BUF
+00E729  1  38                   sec
+00E72A  1  A5 10                lda GS
+00E72C  1  E9 00                sbc #<BUF
+00E72E  1  85 20                sta T
+00E730  1  A5 11                lda GS+1
+00E732  1  E9 04                sbc #>BUF
+00E734  1  85 21                sta T+1
+00E736  1                       ; above the screen? TOPPOS = start of the cursor line
+00E736  1  A5 20                lda T
+00E738  1  C5 14                cmp TOPPOS
+00E73A  1  A5 21                lda T+1
+00E73C  1  E5 15                sbc TOPPOS+1
+00E73E  1  B0 11                bcs @below
+00E740  1  38                   sec
+00E741  1  A5 20                lda T
+00E743  1  E5 1A                sbc COL
+00E745  1  85 14                sta TOPPOS
+00E747  1  A5 21                lda T+1
+00E749  1  E9 00                sbc #0
+00E74B  1  85 15                sta TOPPOS+1
+00E74D  1  A9 02                lda #2
+00E74F  1  85 26                sta REDRAW
+00E751  1               @below: ; rows between TOPPOS and the cursor (all before the gap)
+00E751  1  20 8A E7             jsr countrows
+00E754  1  C9 18                cmp #TEXTROWS
+00E756  1  90 10                bcc @rowok
+00E758  1                       ; too far down: move TOPPOS down one line at a time
+00E758  1  20 BA E7     @down:  jsr topnext
+00E75B  1  20 8A E7             jsr countrows
+00E75E  1  C9 18                cmp #TEXTROWS
+00E760  1  B0 F6                bcs @down
+00E762  1  48                   pha
+00E763  1  A9 02                lda #2
+00E765  1  85 26                sta REDRAW
+00E767  1  68                   pla
+00E768  1  85 1B        @rowok: sta CURROW
+00E76A  1                       ; sideways
+00E76A  1  A5 1A                lda COL
+00E76C  1  C5 18                cmp LEFTCOL
+00E76E  1  B0 07                bcs @right
+00E770  1  85 18                sta LEFTCOL
+00E772  1  A9 02                lda #2
+00E774  1  85 26                sta REDRAW
+00E776  1  60                   rts
+00E777  1  38           @right: sec
+00E778  1  E5 18                sbc LEFTCOL
+00E77A  1  C9 50                cmp #80
+00E77C  1  90 0B                bcc @ok
+00E77E  1  A5 1A                lda COL
+00E780  1  38                   sec
+00E781  1  E9 4F                sbc #79
+00E783  1  85 18                sta LEFTCOL
+00E785  1  A9 02                lda #2
+00E787  1  85 26                sta REDRAW
+00E789  1  60           @ok:    rts
+00E78A  1               
+00E78A  1               ; A = number of CRs from TOPPOS to the cursor (stops at TEXTROWS)
+00E78A  1               countrows:
+00E78A  1  A5 14                lda TOPPOS
+00E78C  1  85 1C                sta P
+00E78E  1  18                   clc
+00E78F  1  A5 15                lda TOPPOS+1
+00E791  1  69 04                adc #>BUF
+00E793  1  85 1D                sta P+1
+00E795  1  A2 00                ldx #0
+00E797  1  A5 1C        @loop:  lda P
+00E799  1  C5 10                cmp GS
+00E79B  1  D0 06                bne @go
+00E79D  1  A5 1D                lda P+1
+00E79F  1  C5 11                cmp GS+1
+00E7A1  1  F0 15                beq @done
+00E7A3  1  A0 00        @go:    ldy #0
+00E7A5  1  B1 1C                lda (P),y
+00E7A7  1  C9 0D                cmp #CR
+00E7A9  1  D0 05                bne :+
+00E7AB  1  E8                   inx
+00E7AC  1  E0 18                cpx #TEXTROWS
+00E7AE  1  B0 08                bcs @done
+00E7B0  1  E6 1C        :       inc P
+00E7B2  1  D0 E3                bne @loop
+00E7B4  1  E6 1D                inc P+1
+00E7B6  1  D0 DF                bne @loop
+00E7B8  1  8A           @done:  txa
+00E7B9  1  60                   rts
+00E7BA  1               
+00E7BA  1               ; TOPPOS = start of the line after the one at TOPPOS
+00E7BA  1               topnext:
+00E7BA  1  A5 14                lda TOPPOS
+00E7BC  1  85 22                sta POS
+00E7BE  1  A5 15                lda TOPPOS+1
+00E7C0  1  85 23                sta POS+1
+00E7C2  1  20 DE E6     @loop:  jsr getc
+00E7C5  1  B0 07                bcs @done
+00E7C7  1  20 1F E7             jsr incpos
+00E7CA  1  C9 0D                cmp #CR
+00E7CC  1  D0 F4                bne @loop
+00E7CE  1  A5 22        @done:  lda POS
+00E7D0  1  85 14                sta TOPPOS
+00E7D2  1  A5 23                lda POS+1
+00E7D4  1  85 15                sta TOPPOS+1
+00E7D6  1  60                   rts
+00E7D7  1               
+00E7D7  1               drawall:
+00E7D7  1  A5 14                lda TOPPOS              ; TOPPOS is never after the cursor, so it is
+00E7D9  1  85 30                sta DP                  ; before the gap: DP = BUF + TOPPOS
+00E7DB  1  18                   clc
+00E7DC  1  A5 15                lda TOPPOS+1
+00E7DE  1  69 04                adc #>BUF
+00E7E0  1  85 31                sta DP+1
+00E7E2  1  A9 00                lda #0
+00E7E4  1  85 24                sta ROW
+00E7E6  1  20 03 E8     @loop:  jsr drawline
+00E7E9  1  E6 24                inc ROW
+00E7EB  1  A5 24                lda ROW
+00E7ED  1  C9 18                cmp #TEXTROWS
+00E7EF  1  90 F5                bcc @loop
+00E7F1  1  60                   rts
+00E7F2  1               
+00E7F2  1               ; Only the cursor's line
+00E7F2  1               drawcur:
+00E7F2  1  38                   sec                     ; DP = GS - COL: the start of the cursor line
+00E7F3  1  A5 10                lda GS
+00E7F5  1  E5 1A                sbc COL
+00E7F7  1  85 30                sta DP
+00E7F9  1  A5 11                lda GS+1
+00E7FB  1  E9 00                sbc #0
+00E7FD  1  85 31                sta DP+1
+00E7FF  1  A5 1B                lda CURROW
+00E801  1  85 24                sta ROW
+00E803  1                       ; falls into drawline
+00E803  1               
+00E803  1               ; Draws the line at DP on screen row ROW; DP ends at the next line
+00E803  1               drawline:
+00E803  1  A5 28                lda TXTCOL
+00E805  1  8D 21 D0             sta COLOR
+00E808  1  A5 24                lda ROW
+00E80A  1  8D 16 D0             sta CURY
+00E80D  1  A9 00                lda #0
+00E80F  1  8D 15 D0             sta CURX
+00E812  1  A6 18                ldx LEFTCOL             ; skip the columns left of the screen
+00E814  1  F0 16                beq @show
+00E816  1  8A           @skip:  txa
+00E817  1  48                   pha
+00E818  1  20 68 E8             jsr getp
+00E81B  1  B0 0E                bcs @skipend
+00E81D  1  C9 0D                cmp #CR
+00E81F  1  F0 0A                beq @skipend
+00E821  1  20 90 E8             jsr incdp
+00E824  1  68                   pla
+00E825  1  AA                   tax
+00E826  1  CA                   dex
+00E827  1  D0 ED                bne @skip
+00E829  1  F0 01                beq @show
+00E82B  1               @skipend:
+00E82B  1  68                   pla
+00E82C  1  A9 50        @show:  lda #80
+00E82E  1  85 25                sta CNT
+00E830  1  20 68 E8     @char:  jsr getp
+00E833  1  B0 21                bcs @pad
+00E835  1  C9 0D                cmp #CR
+00E837  1  F0 1D                beq @pad
+00E839  1  C9 20                cmp #' '                ; control characters (tabs...) as spaces
+00E83B  1  B0 02                bcs :+
+00E83D  1  A9 20                lda #' '
+00E83F  1  8D 12 D0     :       sta DSP
+00E842  1  20 90 E8             jsr incdp
+00E845  1  C6 25                dec CNT
+00E847  1  D0 E7                bne @char
+00E849  1  20 68 E8     @rest:  jsr getp                ; the part right of the screen
+00E84C  1  B0 19                bcs @done
+00E84E  1  20 90 E8             jsr incdp
+00E851  1  C9 0D                cmp #CR
+00E853  1  D0 F4                bne @rest
+00E855  1  60                   rts
+00E856  1  A9 20        @pad:   lda #' '
+00E858  1  8D 12 D0     @padl:  sta DSP
+00E85B  1  C6 25                dec CNT
+00E85D  1  D0 F9                bne @padl
+00E85F  1  20 68 E8             jsr getp                ; past the CR
+00E862  1  B0 03                bcs @done
+00E864  1  20 90 E8             jsr incdp
+00E867  1  60           @done:  rts
+00E868  1               
+00E868  1               ; Character at DP (jumping over the gap), carry set at the end
+00E868  1               getp:
+00E868  1  A5 30                lda DP
+00E86A  1  C5 10                cmp GS
+00E86C  1  D0 0E                bne @chk
+00E86E  1  A5 31                lda DP+1
+00E870  1  C5 11                cmp GS+1
+00E872  1  D0 08                bne @chk
+00E874  1  A5 12                lda GE                  ; at the gap: continue after it
+00E876  1  85 30                sta DP
+00E878  1  A5 13                lda GE+1
+00E87A  1  85 31                sta DP+1
+00E87C  1  A5 30        @chk:   lda DP
+00E87E  1  C9 F0                cmp #<TOP
+00E880  1  D0 06                bne @read
+00E882  1  A5 31                lda DP+1
+00E884  1  C9 CB                cmp #>TOP
+00E886  1  F0 06                beq @end
+00E888  1  A0 00        @read:  ldy #0
+00E88A  1  B1 30                lda (DP),y
+00E88C  1  18                   clc
+00E88D  1  60                   rts
+00E88E  1  38           @end:   sec
+00E88F  1  60                   rts
+00E890  1               
+00E890  1               incdp:
+00E890  1  E6 30                inc DP
+00E892  1  D0 02                bne :+
+00E894  1  E6 31                inc DP+1
+00E896  1  60           :       rts
+00E897  1               
+00E897  1               drawstatus:
+00E897  1  A9 70                lda #STCOLOR
+00E899  1  8D 21 D0             sta COLOR
+00E89C  1  A9 18                lda #STATUSROW
+00E89E  1  8D 16 D0             sta CURY
+00E8A1  1  A9 00                lda #0
+00E8A3  1  8D 15 D0             sta CURX
+00E8A6  1  A5 2E                lda MSG+1
+00E8A8  1  F0 0A                beq @normal
+00E8AA  1  A5 2D                lda MSG
+00E8AC  1  A6 2E                ldx MSG+1
+00E8AE  1  20 51 E9             jsr puts
+00E8B1  1  4C 2D E9             jmp @fill
+00E8B4  1               @normal:
+00E8B4  1  A9 B6                lda #<s_title
+00E8B6  1  A2 EA                ldx #>s_title
+00E8B8  1  20 51 E9             jsr puts
+00E8BB  1  AD 02 03             lda NAMELEN
+00E8BE  1  D0 0A                bne @name
+00E8C0  1  A9 BE                lda #<s_noname
+00E8C2  1  A2 EA                ldx #>s_noname
+00E8C4  1  20 51 E9             jsr puts
+00E8C7  1  4C D8 E8             jmp @mod
+00E8CA  1  A2 00        @name:  ldx #0
+00E8CC  1  BD 10 03     @nl:    lda NAME,x
+00E8CF  1  8D 12 D0             sta DSP
+00E8D2  1  E8                   inx
+00E8D3  1  EC 02 03             cpx NAMELEN
+00E8D6  1  90 F4                bcc @nl
+00E8D8  1  A5 27        @mod:   lda MODIFIED
+00E8DA  1  F0 05                beq :+
+00E8DC  1  A9 2A                lda #'*'
+00E8DE  1  8D 12 D0             sta DSP
+00E8E1  1  A9 C4        :       lda #<s_line
+00E8E3  1  A2 EA                ldx #>s_line
+00E8E5  1  20 51 E9             jsr puts
+00E8E8  1  18                   clc
+00E8E9  1  A5 16                lda CURLINE
+00E8EB  1  69 01                adc #1
+00E8ED  1  85 2A                sta NUM
+00E8EF  1  A5 17                lda CURLINE+1
+00E8F1  1  69 00                adc #0
+00E8F3  1  85 2B                sta NUM+1
+00E8F5  1  20 69 E9             jsr prdec
+00E8F8  1  A9 CB                lda #<s_col
+00E8FA  1  A2 EA                ldx #>s_col
+00E8FC  1  20 51 E9             jsr puts
+00E8FF  1  18                   clc
+00E900  1  A5 1A                lda COL
+00E902  1  69 01                adc #1
+00E904  1  85 2A                sta NUM
+00E906  1  A9 00                lda #0
+00E908  1  69 00                adc #0
+00E90A  1  85 2B                sta NUM+1
+00E90C  1  20 69 E9             jsr prdec
+00E90F  1  A9 D2                lda #<s_free
+00E911  1  A2 EA                ldx #>s_free
+00E913  1  20 51 E9             jsr puts
+00E916  1  38                   sec
+00E917  1  A5 12                lda GE
+00E919  1  E5 10                sbc GS
+00E91B  1  85 2A                sta NUM
+00E91D  1  A5 13                lda GE+1
+00E91F  1  E5 11                sbc GS+1
+00E921  1  85 2B                sta NUM+1
+00E923  1  20 69 E9             jsr prdec
+00E926  1  A9 DA                lda #<s_keys
+00E928  1  A2 EA                ldx #>s_keys
+00E92A  1  20 51 E9             jsr puts
+00E92D  1  AD 15 D0     @fill:  lda CURX                ; spaces to column 78, then the last cell
+00E930  1  C9 4F                cmp #79
+00E932  1  B0 08                bcs @last
+00E934  1  A9 20                lda #' '
+00E936  1  8D 12 D0             sta DSP
+00E939  1  4C 2D E9             jmp @fill
+00E93C  1  A9 4F        @last:  lda #79                 ; written directly: printing there would
+00E93E  1  8D 15 D0             sta CURX                ; scroll the screen
+00E941  1  A9 20                lda #' '
+00E943  1  8D 17 D0             sta VCHR
+00E946  1  A9 70                lda #STCOLOR
+00E948  1  8D 18 D0             sta VCOL
+00E94B  1  A5 28                lda TXTCOL
+00E94D  1  8D 21 D0             sta COLOR
+00E950  1  60                   rts
+00E951  1               
+00E951  1               ; Prints the zero-terminated string at X (high) A (low), stops at column 79
+00E951  1               puts:
+00E951  1  85 1E                sta Q
+00E953  1  86 1F                stx Q+1
+00E955  1  A0 00                ldy #0
+00E957  1  B1 1E        @loop:  lda (Q),y
+00E959  1  F0 0D                beq @done
+00E95B  1  AE 15 D0             ldx CURX
+00E95E  1  E0 4F                cpx #79
+00E960  1  B0 06                bcs @done
+00E962  1  8D 12 D0             sta DSP
+00E965  1  C8                   iny
+00E966  1  D0 EF                bne @loop
+00E968  1  60           @done:  rts
+00E969  1               
+00E969  1               ; Prints NUM (0-65535) in decimal
+00E969  1               prdec:
+00E969  1  A9 00                lda #0
+00E96B  1  85 2C                sta NZ
+00E96D  1  A2 00                ldx #0                  ; power of ten index
+00E96F  1  A0 30        @digit: ldy #'0'
+00E971  1  A5 2A        @sub:   lda NUM                 ; NUM >= 10^n ?
+00E973  1  DD A1 E9             cmp tens_lo,x
+00E976  1  A5 2B                lda NUM+1
+00E978  1  FD A6 E9             sbc tens_hi,x
+00E97B  1  90 0C                bcc @put
+00E97D  1  85 2B                sta NUM+1
+00E97F  1  A5 2A                lda NUM
+00E981  1  FD A1 E9             sbc tens_lo,x
+00E984  1  85 2A                sta NUM
+00E986  1  C8                   iny
+00E987  1  D0 E8                bne @sub
+00E989  1  98           @put:   tya
+00E98A  1  E0 04                cpx #4                  ; always print the last digit
+00E98C  1  F0 08                beq @show
+00E98E  1  C9 30                cmp #'0'
+00E990  1  D0 04                bne @show
+00E992  1  A4 2C                ldy NZ
+00E994  1  F0 05                beq @skip
+00E996  1  8D 12 D0     @show:  sta DSP
+00E999  1  85 2C                sta NZ
+00E99B  1  E8           @skip:  inx
+00E99C  1  E0 05                cpx #5
+00E99E  1  90 CF                bcc @digit
+00E9A0  1  60                   rts
+00E9A1  1  10 E8 64 0A  tens_lo: .byte <10000, <1000, <100, <10, <1
+00E9A5  1  01           
+00E9A6  1  27 03 00 00  tens_hi: .byte >10000, >1000, >100, >10, >1
+00E9AA  1  00           
+00E9AB  1               
+00E9AB  1               setmsg:
+00E9AB  1  85 2D                sta MSG
+00E9AD  1  86 2E                stx MSG+1
+00E9AF  1  60                   rts
+00E9B0  1               
+00E9B0  1               ; Message for a failed disk command
+00E9B0  1               diskmsg:
+00E9B0  1  A9 39                lda #<s_diskerr
+00E9B2  1  A2 EB                ldx #>s_diskerr
+00E9B4  1  4C AB E9             jmp setmsg
+00E9B7  1               
+00E9B7  1               ; Shows a prompt on the status line
+00E9B7  1               prompt:
+00E9B7  1  48                   pha
+00E9B8  1  8A                   txa
+00E9B9  1  48                   pha
+00E9BA  1  A9 70                lda #STCOLOR
+00E9BC  1  8D 21 D0             sta COLOR
+00E9BF  1  A9 18                lda #STATUSROW
+00E9C1  1  8D 16 D0             sta CURY
+00E9C4  1  A9 00                lda #0
+00E9C6  1  8D 15 D0             sta CURX
+00E9C9  1  68                   pla
+00E9CA  1  AA                   tax
+00E9CB  1  68                   pla
+00E9CC  1  20 51 E9             jsr puts
+00E9CF  1  AD 15 D0     @clr:   lda CURX                ; clear the rest of the line
+00E9D2  1  48                   pha
+00E9D3  1  AD 15 D0     @sp:    lda CURX
+00E9D6  1  C9 4F                cmp #79
+00E9D8  1  B0 08                bcs @back
+00E9DA  1  A9 20                lda #' '
+00E9DC  1  8D 12 D0             sta DSP
+00E9DF  1  4C D3 E9             jmp @sp
+00E9E2  1  68           @back:  pla
+00E9E3  1  8D 15 D0             sta CURX
+00E9E6  1  60                   rts
+00E9E7  1               
+00E9E7  1               ; Asks for a file name on the status line (starts with the current name).
+00E9E7  1               ; Carry set if Esc. The name is in INBUF / INLEN.
+00E9E7  1               askname:
+00E9E7  1  20 B7 E9             jsr prompt
+00E9EA  1  AD 15 D0             lda CURX
+00E9ED  1  85 24                sta ROW                 ; where the name starts
+00E9EF  1  A2 00                ldx #0
+00E9F1  1  EC 02 03     @copy:  cpx NAMELEN
+00E9F4  1  B0 09                bcs @copied
+00E9F6  1  BD 10 03             lda NAME,x
+00E9F9  1  9D 50 03             sta INBUF,x
+00E9FC  1  E8                   inx
+00E9FD  1  D0 F2                bne @copy
+00E9FF  1               @copied:
+00E9FF  1  8E 40 03             stx INLEN
+00EA02  1  A5 24        @show:  lda ROW                 ; redraw the name
+00EA04  1  8D 15 D0             sta CURX
+00EA07  1  A2 00                ldx #0
+00EA09  1  EC 40 03     @sl:    cpx INLEN
+00EA0C  1  B0 09                bcs @sp
+00EA0E  1  BD 50 03             lda INBUF,x
+00EA11  1  8D 12 D0             sta DSP
+00EA14  1  E8                   inx
+00EA15  1  D0 F2                bne @sl
+00EA17  1  AD 15 D0     @sp:    lda CURX
+00EA1A  1  48                   pha
+00EA1B  1  A9 20                lda #' '
+00EA1D  1  8D 12 D0             sta DSP
+00EA20  1  68                   pla
+00EA21  1  8D 15 D0             sta CURX                ; cursor after the name
+00EA24  1  20 C7 E0     @key:   jsr getkey
+00EA27  1  C9 0D                cmp #CR
+00EA29  1  F0 2B                beq @enter
+00EA2B  1  C9 1B                cmp #ESC
+00EA2D  1  F0 33                beq @esc
+00EA2F  1  C9 08                cmp #$08
+00EA31  1  F0 18                beq @bs
+00EA33  1  C9 7F                cmp #$7F
+00EA35  1  F0 14                beq @bs
+00EA37  1  20 69 EA             jsr namechar
+00EA3A  1  B0 E8                bcs @key
+00EA3C  1  AE 40 03             ldx INLEN
+00EA3F  1  E0 28                cpx #NAMEMAX
+00EA41  1  B0 E1                bcs @key
+00EA43  1  9D 50 03             sta INBUF,x
+00EA46  1  EE 40 03             inc INLEN
+00EA49  1  D0 B7                bne @show
+00EA4B  1  AD 40 03     @bs:    lda INLEN
+00EA4E  1  F0 D4                beq @key
+00EA50  1  CE 40 03             dec INLEN
+00EA53  1  4C 02 EA             jmp @show
+00EA56  1  AD 40 03     @enter: lda INLEN
+00EA59  1  F0 C9                beq @key                ; a name is needed
+00EA5B  1  A9 02                lda #2                  ; the status line will be redrawn
+00EA5D  1  20 4D E4             jsr wantredraw
+00EA60  1  18                   clc
+00EA61  1  60                   rts
+00EA62  1  A9 02        @esc:   lda #2
+00EA64  1  20 4D E4             jsr wantredraw
+00EA67  1  38                   sec
+00EA68  1  60                   rts
+00EA69  1               
+00EA69  1               ; Carry clear if A may be in a file name (A-Z a-z 0-9 . _ -)
+00EA69  1               namechar:
+00EA69  1  C9 2E                cmp #'.'
+00EA6B  1  F0 22                beq @ok
+00EA6D  1  C9 5F                cmp #'_'
+00EA6F  1  F0 1E                beq @ok
+00EA71  1  C9 2D                cmp #'-'
+00EA73  1  F0 1A                beq @ok
+00EA75  1  C9 30                cmp #'0'
+00EA77  1  90 14                bcc @no
+00EA79  1  C9 3A                cmp #'9'+1
+00EA7B  1  90 12                bcc @ok
+00EA7D  1  C9 41                cmp #'A'
+00EA7F  1  90 0C                bcc @no
+00EA81  1  C9 5B                cmp #'Z'+1
+00EA83  1  90 0A                bcc @ok
+00EA85  1  C9 61                cmp #'a'
+00EA87  1  90 04                bcc @no
+00EA89  1  C9 7B                cmp #'z'+1
+00EA8B  1  90 02                bcc @ok
+00EA8D  1  38           @no:    sec
+00EA8E  1  60                   rts
+00EA8F  1  18           @ok:    clc
+00EA90  1  60                   rts
+00EA91  1               
+00EA91  1               ; Disk name = INBUF / INLEN
+00EA91  1               setdname:
+00EA91  1  A9 50                lda #<INBUF
+00EA93  1  8D 46 D0             sta DNAME
+00EA96  1  A9 03                lda #>INBUF
+00EA98  1  8D 47 D0             sta DNAME+1
+00EA9B  1  AD 40 03             lda INLEN
+00EA9E  1  8D 48 D0             sta DNLEN
+00EAA1  1  60                   rts
+00EAA2  1               
+00EAA2  1               ; The typed name becomes the file's name
+00EAA2  1               usename:
+00EAA2  1  A2 00                ldx #0
+00EAA4  1  EC 40 03     @loop:  cpx INLEN
+00EAA7  1  B0 09                bcs @done
+00EAA9  1  BD 50 03             lda INBUF,x
+00EAAC  1  9D 10 03             sta NAME,x
+00EAAF  1  E8                   inx
+00EAB0  1  D0 F2                bne @loop
+00EAB2  1  8E 02 03     @done:  stx NAMELEN
+00EAB5  1  60                   rts
+00EAB6  1               
+00EAB6  1               ; --- text ----------------------------------------------------------------------
+00EAB6  1  20 45 44 49  s_title:   .byte " EDIT  ", 0
+00EABA  1  54 20 20 00  
+00EABE  1  28 6E 65 77  s_noname:  .byte "(new)", 0
+00EAC2  1  29 00        
+00EAC4  1  20 20 20 4C  s_line:    .byte "   Ln ", 0
+00EAC8  1  6E 20 00     
+00EACB  1  20 20 43 6F  s_col:     .byte "  Col ", 0
+00EACF  1  6C 20 00     
+00EAD2  1  20 20 46 72  s_free:    .byte "  Free ", 0
+00EAD6  1  65 65 20 00  
+00EADA  1  20 20 20 5E  s_keys:    .byte "   ^S save ^L load ^N new Esc exit", 0
+00EADE  1  53 20 73 61  
+00EAE2  1  76 65 20 5E  
+00EAFD  1  20 53 61 76  s_saveas:  .byte " Save as: ", 0
+00EB01  1  65 20 61 73  
+00EB05  1  3A 20 00     
+00EB08  1  20 4C 6F 61  s_load:    .byte " Load: ", 0
+00EB0C  1  64 3A 20 00  
+00EB10  1  20 53 61 76  s_saved:   .byte " Saved", 0
+00EB14  1  65 64 00     
+00EB17  1  20 4C 6F 61  s_loaded:  .byte " Loaded", 0
+00EB1B  1  64 65 64 00  
+00EB1F  1  20 4E 6F 20  s_notfound: .byte " No such file on the disk", 0
+00EB23  1  73 75 63 68  
+00EB27  1  20 66 69 6C  
+00EB39  1  20 44 69 73  s_diskerr: .byte " Disk error (bad name, or the file does not fit)", 0
+00EB3D  1  6B 20 65 72  
+00EB41  1  72 6F 72 20  
+00EB6A  1  20 55 6E 73  s_discard: .byte " Unsaved changes: press Y to throw them away", 0
+00EB6E  1  61 76 65 64  
+00EB72  1  20 63 68 61  
+00EB97  1               
+00EB97  1                       .assert * <= $F000, error, "the editor must fit in $E000-$EFFF"
+00EB97  1               
