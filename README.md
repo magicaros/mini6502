@@ -120,8 +120,8 @@ Toolkit modules are split across memory banks for organization:
 - **TK3/TK4/TK5** — Additional toolkit components (banks $1A–$19)
 
 ### Screenshots
-![toolkit-memory-map](images/toolkit-memory.png)
-> *Screenshot placeholder: Show the toolkit memory bank layout.*
+![desktop](images/desktop.png)
+![basic](images/basic.png)
 
 ## License Summary
 
