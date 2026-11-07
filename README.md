@@ -50,7 +50,7 @@ From the desktop: double-click icons files. basic files while drop back to basic
 The extension wedge adds commands via the `!` prefix. Examples:
 
 ```basic
-10 !SCREEN 3                    ' hires mode (640 × 400)
+10 !SCREEN 1                    ' lowres mode (160 × 200)
 20 !COLOR 15                     ' set colour index (0–31 + DIM)
 30 FOR I=0 TO 159 STEP 4
 40     !LINE 80,100,I,0           ' draw a line from (80,100) to (I,0)
