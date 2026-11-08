@@ -49,6 +49,24 @@ Delete and Tab; Ctrl+N new, Ctrl+L load, Ctrl+S save, Esc return. Errors
 show a line number and message, and move the cursor to that source line.
 An unsaved source buffer can be assembled directly.
 
+The save prompt summarizes the inclusive output address range, byte count
+(`B`), and symbol count (`sym`), for example:
+
+```text
+ $0300-$0305 6B 1sym Save:
+```
+
+After saving, or cancelling the filename prompt with Esc, the status line
+keeps the full result: byte count, address range, symbol count, and whether
+the binary was saved. Disk errors and invalid save ranges explicitly say
+that the binary was not saved. These messages remain until the next key.
+
+Assembly errors show a one-based line and parser column and move the
+cursor there. Unknown instructions, undefined symbols, and duplicate
+symbols name the offending token and point to its beginning. Included
+source errors use `filename:line:column`; the cursor points to the main
+buffer's include directive. Diagnostic messages fit within the status line.
+
 ## Syntax
 
 Instructions and symbols are case-insensitive. Labels end in `:`;

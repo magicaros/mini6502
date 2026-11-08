@@ -115,14 +115,27 @@ k_assemble:
         jsr right1
         bcc @line
 @atline:
+        ldx $C412               ; core's 1-based error column in the root buffer
+        beq @positioned
+        dex
+        beq @positioned
+@column:
+        jsr charafter
+        bcs @positioned
+        cmp #CR
+        beq @positioned
+        jsr right1
+        dex
+        bne @column
+@positioned:
         jsr setwant
         lda #2
         sta REDRAW
         lda #<$C500
         ldx #>$C500
         jmp setmsg
-@save:  lda #<asm_saveas
-        ldx #>asm_saveas
+@save:  lda #<$C480             ; address/size/symbol summary + filename prompt
+        ldx #>$C480
         pha
         lda NAMELEN
         sta ASMBANK
@@ -208,7 +221,7 @@ asm_stage: .byte $00,$44,$FF, 0,0,$FF, 0,0,0
 asm_core_name: .byte "/ASM/ASMCORE",0
 asm_missing: .byte " Cannot load /ASM/ASMCORE (missing or too large)",0
 asm_work: .byte " Assembling...",0
-asm_saveas: .byte " Assembled. Save binary as: ",0
 asm_samename: .byte " Binary name must differ from source name",0
 asm_error_line: .byte " Line ",0
+asm_error_col: .byte " col ",0
         .assert * <= $EF00, error, "ASM code overlaps its save-name buffer"

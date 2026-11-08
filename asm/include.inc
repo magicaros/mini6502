@@ -525,10 +525,19 @@ include_cleanup:
 ; included basename and local line to the status message (bounded to 79).
 include_diagnostic:
         lda IACTIVE
-        jeq @done
+        beq @done
         sec
         sbc #1
         jsr include_record
+        ldx #0
+@save: lda MESSAGE,x
+        sta IRAW,x
+        beq @path
+        inx
+        bne @save
+@path: lda #0
+        sta FBINDEX
+        sta FBCOUNT
         ldy #0
         ldx #0
 @scan: lda (IREC),y
@@ -543,57 +552,30 @@ include_diagnostic:
 @basename:
         txa
         tay
-        ldx #0
 @name: lda (IREC),y
-        beq @colon
-        sta IRAW,x
+        beq @line
+        jsr fb_char
         iny
-        inx
-        cpx #24
+        inc FBCOUNT
+        lda FBCOUNT
+        cmp #24
         bcc @name
-@colon: lda #':'
-        sta IRAW,x
-        inx
+@line: lda #':'
+        jsr fb_char
         lda LINE
-        sta IPTR
-        lda LINE+1
-        sta IPTR+1
-        ldy #0
-@digit: lda #'0'
-        sta ICOMP
-@sub:  lda IPTR
-        cmp i_tens_lo,y
-        lda IPTR+1
-        sbc i_tens_hi,y
-        bcc @put
-        sta IPTR+1
-        lda IPTR
-        sbc i_tens_lo,y
-        sta IPTR
-        inc ICOMP
-        bne @sub
-@put:  lda ICOMP
-        sta IRAW,x
-        inx
-        iny
-        cpy #5
-        bcc @digit
-        ldy #0
-@msg:  lda MESSAGE,y
-        beq @end
-        sta IRAW,x
-        iny
-        inx
-        cpx #79
-        bcc @msg
-@end:  lda #0
-        sta IRAW,x
+        ldx LINE+1
+        jsr fb_number
+        lda #':'
+        jsr fb_char
+        lda ERRCOL
         ldx #0
-@copy: lda IRAW,x
-        sta MESSAGE,x
-        beq @done
-        inx
-        bne @copy
+        jsr fb_number
+        lda #' '
+        jsr fb_char
+        lda #<IRAW
+        ldx #>IRAW
+        jsr fb_string
+        jmp fb_finish
 @done: rts
 
 ERROR err_include_missing, i_missing

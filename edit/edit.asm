@@ -1382,6 +1382,14 @@ drawstatus:
         lda $C402
         sta NUM+1
         jsr prdec
+        lda #<asm_error_col
+        ldx #>asm_error_col
+        jsr puts
+        lda $C412
+        sta NUM
+        lda #0
+        sta NUM+1
+        jsr prdec
 @message:
 .endif
         lda MSG

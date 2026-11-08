@@ -41,6 +41,15 @@ EOFFLAG = $C409
 FILL = $C40A
 COUNT = $C40B
 SYMKIND = $C40D
+ERRCOL = $C412                 ; 1-based parser column (root navigation)
+TOKSTART = $C413
+FBSTATE = $C414
+FBINDEX = $C415
+FBEND = $C416
+FBDIGIT = $C418
+FBNONZERO = $C419
+FBCOUNT = $C41A
+SUMMARY = $C480                ; compact summary + binary filename prompt
 LABEL = $C720
 IADDR = $60                    ; current included stream's extended address
 ILEFT = $63                    ; bytes remaining in that stream
@@ -77,6 +86,7 @@ assemble:
         sta NSYM
         sta NSYM+1
         sta PASS
+        sta IDX
         jsr include_init
 @pass: lda #0
         sta PC
@@ -122,10 +132,8 @@ assemble:
         sta LENGTH+1
         ora LENGTH
         jeq err_empty
-        ; Success, also used if the binary save prompt is cancelled.
-        lda #<msg_ok
-        ldx #>msg_ok
-        jmp message
+        ; Prepare both the visible result and compact filename prompt.
+        jmp feedback_ready
 
 ; Read CR, LF or CRLF lines from the root gap buffer or cached include.
 read_line:
@@ -146,7 +154,11 @@ read_line:
         sta IPREVCR
         pla
         cpx #254
-        jcs err_longline
+        bcc @store
+        lda #254
+        sta IDX                 ; 255th character, rather than previous line's IDX
+        jmp err_longline
+@store:
         sta LINEBUF,x
         inx
         jmp @next
@@ -260,7 +272,9 @@ letter: jsr upper
 @yes:  clc
         rts
 
-token:  ldx #0
+token:  lda IDX
+        sta TOKSTART
+        ldx #0
         jsr peek
         cmp #'.'
         bne @char
@@ -1089,16 +1103,13 @@ save_binary:
 save_status:
         cmp #0
         bne @error
-        lda #<msg_saved
-        ldx #>msg_saved
-        jmp message
-@error: lda #<msg_disk
-        ldx #>msg_disk
-        jmp message
+        lda #1
+        jmp feedback_result
+@error: lda #3
+        jmp feedback_result
 save_range:
-        lda #<msg_save_range
-        ldx #>msg_save_range
-        jmp message
+        lda #4
+        jmp feedback_result
 
 ; All assembly errors unwind to the core caller, leaving editor state intact.
 .macro ERROR name, text
@@ -1123,6 +1134,12 @@ ERROR err_output, msg_output
 ERROR err_longline, msg_longline
 ERROR err_empty, msg_empty
 fail:   pha
+        lda IDX
+        clc
+        adc #1
+        bne :+
+        lda #255
+:       sta ERRCOL
         lda #1
         sta RESULT
         lda LINE
@@ -1137,8 +1154,13 @@ fail:   pha
         sta ERRLINE+1
 :       pla
         jsr message
+        jsr feedback_error_detail
         jsr include_diagnostic
-        jsr include_cleanup
+        lda IACTIVE
+        beq :+
+        lda #1                 ; editor navigates to the root include directive
+        sta ERRCOL
+:       jsr include_cleanup
         ldx SAVEDSP
         txs
         rts
@@ -1163,10 +1185,6 @@ dir_text: .byte ".TEXT",0
 dir_res: .byte ".RES",0
 dir_end: .byte ".END",0
 dir_include: .byte ".INCLUDE",0
-msg_ok: .byte " Assembled OK (binary not saved)",0
-msg_saved: .byte " Assembled and saved binary",0
-msg_disk: .byte " Disk error saving binary",0
-msg_save_range: .byte " Save range: $0200-$CBFF or one $E000-$EFFF bank",0
 msg_syntax: .byte " Syntax error",0
 msg_opcode: .byte " Unknown instruction or directive",0
 msg_mode: .byte " Invalid addressing mode",0
@@ -1183,6 +1201,7 @@ msg_noorg: .byte " Set .ORG before emitting code",0
 msg_output: .byte " Output exceeds 16384 bytes",0
 msg_longline: .byte " Source line exceeds 254 characters",0
 msg_empty: .byte " No bytes assembled",0
+        .include "feedback.inc"
         .include "include.inc"
         .include "opcodes.inc"
         .assert * <= $A000, error, "assembler overlaps include descriptors"

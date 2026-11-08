@@ -92,8 +92,86 @@ class Machine:
                 return
         raise AssertionError(f'editor timeout PC=${self.cpu.pc:04X}')
 
+    def type_keys(self, keys):
+        self.bus.queue = list(keys.replace('\n', '\r').encode('ascii'))
+        for _ in range(5000000):
+            self.cpu.step()
+            if not self.bus.queue and self.cpu.pc == self.labels['getkey']:
+                return
+        raise AssertionError(f'editor timeout PC=${self.cpu.pc:04X}')
+
 
 class AssemblerTests(unittest.TestCase):
+    def test_assembly_summary_and_save_outcomes(self):
+        m = self.assert_code('.org $0300\nstart: lda #42\nsta $0400\nrts', 'a9 2a 8d 00 04 60')
+        def message():
+            return bytes(m.bus.m[0xc500:0xc550]).split(b'\0')[0].decode()
+        self.assertEqual(message(), ' Assembled: 6 bytes at $0300-$0305 | symbols: 1 | not saved')
+        self.assertEqual(bytes(m.bus.m[0xc480:0xc4d0]).split(b'\0')[0],
+                         b' $0300-$0305 6B 1sym Save: ')
+        # Patch the normal editor save-helper ABI for this direct core call.
+        for label, offsets in [('d_keep',(4,5)),('d_load',(1,2))]:
+            for off,v in zip(offsets,[0,8]):
+                m.bus.banks[0x20000+m.labels[label]-0xe000+off] = v
+        m.save('SUMMARYBIN')
+        self.assertEqual(message(), ' Saved: 6 bytes at $0300-$0305 | symbols: 1')
+        (Path(_disk.name)/'SUMMARYFAIL').mkdir(exist_ok=True)
+        m.save('SUMMARYFAIL')
+        self.assertIn('Disk error; not saved: 6 bytes', message())
+        m = self.assert_code('.org $d000\nnop', 'ea')
+        m.save('RANGEFAIL')
+        self.assertIn('Invalid save range; not saved: 1 byte at $D000-$D000',
+                      bytes(m.bus.m[0xc500:0xc550]).split(b'\0')[0].decode())
+        self.assertFalse((Path(_disk.name)/'RANGEFAIL').exists())
+
+    def test_summary_handles_full_output_and_symbol_table(self):
+        m = Machine()
+        source = ''.join(f's{i} = {i}\n' for i in range(256)) + '.org $300\n.res 16384'
+        status, message, body = m.assemble(source, max_steps=10000000)
+        self.assertEqual(status, 0, message)
+        self.assertEqual(len(body), 16384)
+        self.assertIn('16384 bytes at $0300-$42FF | symbols: 256', message)
+        prompt = bytes(m.bus.m[0xc480:0xc4d0]).split(b'\0')[0]
+        self.assertEqual(prompt, b' $0300-$42FF 16384B 256sym Save: ')
+        self.assertLessEqual(len(prompt)+40, 79)
+
+    def test_editor_summary_prompt_cancel_and_saved_status(self):
+        m = Machine()
+        source = '.org $300\nstart: lda #42\nrts\n'
+        m.editor(source+'\x01', pause=True)
+        row = ''.join(map(chr,m.bus.g[24]))
+        self.assertIn('$0300-$0302 3B 1sym Save:', row)
+        m.type_keys('\x1b')
+        row = ''.join(map(chr,m.bus.g[24]))
+        self.assertIn('Assembled: 3 bytes at $0300-$0302', row)
+        self.assertIn('symbols: 1 | not saved', row)
+        m.type_keys('\x01FEEDBACKBIN\r')
+        row = ''.join(map(chr,m.bus.g[24]))
+        self.assertIn('Saved: 3 bytes at $0300-$0302 | symbols: 1', row)
+        self.assertEqual((Path(_disk.name)/'FEEDBACKBIN').read_bytes(), bytes.fromhex('00 03 a9 2a 60'))
+
+    def test_diagnostic_names_columns_and_cursor(self):
+        for source, text, column in [('.org $300\nlda missing', 'Undefined symbol: MISSING',5),
+                                     ('.org $300\n  wat #1', 'Unknown instruction or directive: WAT',3),
+                                     ('.org $300\nx: nop\nx: rts', 'Duplicate symbol: X',1)]:
+            with self.subTest(text=text):
+                m = Machine()
+                status, message, _ = m.assemble(source)
+                self.assertEqual(status, 1)
+                self.assertIn(text, message)
+                self.assertEqual(m.bus.m[0xc412], column)
+        m = Machine()
+        m.editor('.org $300\n  lda missing\n\x01', pause=True)
+        row = ''.join(map(chr,m.bus.g[24]))
+        self.assertIn('Line 2 col 7', row)
+        self.assertIn('Undefined symbol: MISSING', row)
+        self.assertEqual(m.bus.cx, 6)
+        self.assertEqual(m.word(0x16), 1)
+        m = Machine()
+        status, message, _ = m.assemble('.org $300\n;'+'x'*254)
+        self.assertEqual(status, 1)
+        self.assertIn('exceeds 254', message)
+        self.assertEqual(m.bus.m[0xc412], 255)
     def include_file(self, name, text):
         p = Path(_disk.name, name)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -125,7 +203,7 @@ class AssemblerTests(unittest.TestCase):
         m = Machine()
         status, message, _ = m.assemble('.org $300\n.include "/ERRORS/bad.inc"\nrts')
         self.assertEqual(status, 1)
-        self.assertIn('bad.inc:00002', message)
+        self.assertIn('bad.inc:2:5', message)
         self.assertIn('Undefined symbol', message)
         self.assertEqual(m.word(0xc401), 2)
         self.assertEqual(bytes(m.bus.m[0xcf80:0xcf90]), bytes(16))
@@ -185,7 +263,7 @@ class AssemblerTests(unittest.TestCase):
         m.editor(source+'\x01', pause=True)
         row = ''.join(chr(c) for c in m.bus.g[24])
         self.assertIn('Line 2', row)
-        self.assertIn('UIBAD.INC:00002', row)
+        self.assertIn('UIBAD.INC:2:5', row)
         self.assertIn('Undefined symbol', row)
         self.assertEqual(m.word(0x16), 1)
         self.assertEqual(bytes(m.bus.m[0xcf80:0xcf8d]), bytes([0x20])*13)
@@ -345,7 +423,7 @@ class AssemblerTests(unittest.TestCase):
         row = ''.join(chr(c) for c in m.bus.g[24])
         self.assertIn('Line 2', row)
         self.assertIn('Undefined symbol', row)
-        self.assertEqual(m.bus.cx, 0)
+        self.assertEqual(m.bus.cx, 4)
 
     def test_editor_refuses_binary_over_source(self):
         m = Machine()
