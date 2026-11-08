@@ -71,6 +71,12 @@ See `basicx/README.txt` for the complete extension reference.
 - The `!` extension wedge providing graphics, sound, mouse input
 - Includes `GFX` (graphics/sound/mouse), `BX` (extra commands), and more
 
+### 📂 asm/ — Native 6502 Assembler
+- Banked full-screen source editor based on EDIT
+- Ctrl+A assembles source inside mini6502 and saves loadable binaries
+- All official NMOS 6502 opcodes, labels, expressions, and data directives
+- See [asm/README.md](asm/README.md) for startup, syntax, and limits
+
 ### 📂 toolkit/ — Desktop Toolkit
 - Windows, menus, dialogs, file dialog for hires mode
 - Modules TK1–TK5 split across memory banks ($10–$19)

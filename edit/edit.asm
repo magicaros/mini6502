@@ -43,7 +43,15 @@ MONITOR = $FF1F
 
 ; --- memory --------------------------------------------------------------------
 BUF     = $0400         ; text buffer start (page aligned: low byte 0)
+.ifdef ASM_EDITOR
+TOP     = $4400         ; 16K source; output and assembler use the rest
+SIG0 = 'A'
+SIG1 = 'S'
+.else
 TOP     = $CBF0         ; text buffer end (exclusive)
+SIG0 = 'E'
+SIG1 = 'D'
+.endif
 STUB    = $CBF0         ; 8 bytes: LDA #bank / STA BANK / JMP warm
 
 SWAPLEN = $CC00         ; RAM swapped with the caller: $0000-$CBFF
@@ -108,6 +116,9 @@ STCOLOR = $70           ; status line: black on light grey
         jmp warm                ; $E003
         jmp open                ; $E006: empty text, then load the file whose
                                 ; name (0-terminated) is at OPENNAME
+.ifdef ASM_EDITOR
+        jmp asm_save_fixed      ; $E009: core's RAM-preserving binary writer
+.endif
 
 open:   cld
         lda #1
@@ -127,9 +138,9 @@ newimage:
         sta TXTCOL
         jsr clearram            ; the editor's RAM image: $0300-$CBEF = 0
         jsr newtext
-        lda #'E'
+        lda #SIG0
         sta SIG
-        lda #'D'
+        lda #SIG1
         sta SIG+1
         lda #0
         sta NAMELEN
@@ -142,10 +153,10 @@ warm:
         ldx #$FF
         txs
         lda SIG                 ; state there?
-        cmp #'E'
+        cmp #SIG0
         bne newimage            ; no: an empty text (already swapped in)
         lda SIG+1
-        cmp #'D'
+        cmp #SIG1
         bne newimage
         lda BANK
         sta MYBANK
@@ -265,6 +276,11 @@ dokey:
 :       cmp #$0E                ; Ctrl+N
         bne :+
         jmp k_new
+.ifdef ASM_EDITOR
+:       cmp #$01                ; Ctrl+A: assemble, then offer binary save
+        bne :+
+        jmp k_assemble
+.endif
 :       cmp #' '
         bcc @ignore
         cmp #$7F
@@ -765,7 +781,11 @@ newtext:
 ; swapped yet, or before the swap replaces it)
 enter:
         lda BANK                ; the editor must not run from a bank the
+.ifdef ASM_EDITOR
+        cmp #$80                ; ASM allocates its image in $80-$BF
+.else
         cmp #$E0                ; swap uses ($E0-$FF)
+.endif
         bcc @bankok
         pla                     ; refused: beep and return to the caller
         pla
@@ -773,14 +793,17 @@ enter:
         sta BEEP
         rts
 @bankok:
+.ifdef ASM_EDITOR
+        jsr asm_image
+.endif
         lda INSIDE              ; the RAM already holds the editor's image?
         cmp #INMAGIC
         bne @swap
         lda SIG                 ; ...and it still looks like it
-        cmp #'E'
+        cmp #SIG0
         bne @swap
         lda SIG+1
-        cmp #'D'
+        cmp #SIG1
         bne @swap
         rts                     ; yes: nothing to swap
 @swap:  pla                     ; our return address, kept in the bank: the
@@ -1329,6 +1352,21 @@ drawstatus:
         sta CURX
         lda MSG+1
         beq @normal
+.ifdef ASM_EDITOR
+        cmp #$C5
+        bne @message
+        lda $C400
+        beq @message
+        lda #<asm_error_line
+        ldx #>asm_error_line
+        jsr puts
+        lda $C401
+        sta NUM
+        lda $C402
+        sta NUM+1
+        jsr prdec
+@message:
+.endif
         lda MSG
         ldx MSG+1
         jsr puts
@@ -1601,12 +1639,21 @@ usename:
         rts
 
 ; --- text ----------------------------------------------------------------------
+.ifdef ASM_EDITOR
+        .include "editor.inc"
+s_title:   .byte " ASM  ", 0
+.else
 s_title:   .byte " EDIT  ", 0
+.endif
 s_noname:  .byte "(new)", 0
 s_line:    .byte "   Ln ", 0
 s_col:     .byte "  Col ", 0
 s_free:    .byte "  Free ", 0
+.ifdef ASM_EDITOR
+s_keys:    .byte " ^A assemble ^S save ^L load Esc exit", 0
+.else
 s_keys:    .byte "   ^S save ^L load ^N new Esc exit", 0
+.endif
 s_saveas:  .byte " Save as: ", 0
 s_load:    .byte " Load: ", 0
 s_saved:   .byte " Saved", 0
