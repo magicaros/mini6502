@@ -5,6 +5,8 @@ ASMIMAGE = $EF70
 ASMBANK = $EF71
 ASMSTAT = $EF72
 ASMTAG = $EF73
+ASMMODE = $EFF9                ; caller display state, outside swapped RAM
+ASMPTR = $EFFA
 ASMNAME = $EF00
 
 asm_image:

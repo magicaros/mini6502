@@ -359,10 +359,76 @@ class AssemblerTests(unittest.TestCase):
 
     def test_editor_out_of_banks_returns_without_swapping(self):
         m = Machine()
+        m.bus[0xd300] = 3
+        m.bus[0xd508] = 3
         m.bus.m[0xcf80:0xcfc0] = bytes([0x99])*64
         before = bytes(m.bus.m[0x300:0xcc00])
         m.editor('')
         self.assertEqual(bytes(m.bus.m[0x300:0xcc00]), before)
+        self.assertEqual(m.bus[0xd300], 3)
+        self.assertEqual(m.bus[0xd508], 3)
+
+    def test_desktop_file_launch_switches_display_and_restores_caller(self):
+        for warm_reset in [False, True]:
+            with self.subTest(warm_reset=warm_reset):
+                m = Machine()
+                source = '.org $0300\nlda #42\nrts\n'
+                self.include_file('ASM/SCREEN.ASM', source)
+                name = b'/ASM/SCREEN.ASM\0'
+                m.bus.banks[0x20f80:0x20f80+len(name)] = name
+                # Desktop's system-page handoff: LAUNCH calls TARGET through
+                # the actual ROM FARCALL, returns to bank $14, then RESUME.
+                m.bus.m[0xcca0:0xccab] = bytes.fromhex('20 b0 cc a9 14 8d 20 d0 4c 98 cc')
+                m.bus.m[0xccb0:0xccb6] = bytes.fromhex('20 d0 ff 20 06 e0')
+                m.bus.m[0xcc98:0xcc9e] = bytes.fromhex('a9 01 8d ff 02 60')
+                m.bus.bank = 0x14
+                m.bus[0xd300] = 3  # desktop hires screen remains active at launch
+                m.bus[0xd508] = 3  # visible automatic graphics pointer
+                m.bus.warm = 0xcc98
+                m.bus.v.vram[:] = bytes([0xa5])*len(m.bus.v.vram)
+                caller = bytes(m.bus.m[0x300:0xcc00])
+                m.editor('', entry=0xcca0, pause=True)
+                self.assertEqual(m.bus[0xd300], 0)
+                self.assertEqual(m.bus[0xd508], 0)
+                self.assertEqual(''.join(map(chr,m.bus.g[0])).rstrip(), '.org $0300')
+                self.assertIn('Loaded', ''.join(map(chr,m.bus.g[24])))
+                self.assertEqual(bytes(m.bus.v.vram), bytes([0xa5])*len(m.bus.v.vram))
+                if warm_reset:
+                    # F1 resets video and selects bank 0; G uses the saved stub.
+                    m.bus[0xd000] = 3
+                    m.bus.bank = 0
+                    m.editor('\x1b', entry=m.bus.warm)
+                else:
+                    m.bus.queue = [27]
+                    for _ in range(100000):
+                        m.cpu.step()
+                        if m.cpu.pc == 0x200:
+                            break
+                    self.assertEqual(m.cpu.pc, 0x200)
+                self.assertEqual(m.bus[0xd300], 3)
+                self.assertEqual(m.bus[0xd508], 3)
+                self.assertEqual(m.bus.bank, 0x14)
+                self.assertEqual(m.bus.warm, 0xcc98)
+                self.assertEqual(m.bus.m[0x2ff], 1)  # desktop RESUME was reached
+                self.assertEqual(bytes(m.bus.m[0x300:0xcc00]), caller)
+
+    def test_monitor_entry_points_select_text_and_restore_display(self):
+        for entry, mode in [(0xe000,1),(0xe003,4)]:
+            with self.subTest(entry=entry, mode=mode):
+                m = Machine()
+                m.bus[0xd300] = mode
+                m.bus[0xd508] = 1
+                m.editor('', entry=entry, pause=True)
+                self.assertEqual(m.bus[0xd300], 0)
+                self.assertEqual(m.bus[0xd508], 0)
+                m.bus.queue = [27]
+                for _ in range(100000):
+                    m.cpu.step()
+                    if m.cpu.pc == 0x200:
+                        break
+                self.assertEqual(m.cpu.pc, 0x200)
+                self.assertEqual(m.bus[0xd300], mode)
+                self.assertEqual(m.bus[0xd508], 1)
 
     def test_editor_core_loads_from_app_folder_while_editing_elsewhere(self):
         m = Machine()

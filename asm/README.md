@@ -39,6 +39,11 @@ ASM into a nonzero bank below `$80`, normally `$20`; source and caller
 preservation require 13 contiguous free document banks. No boot script or
 far-call vector change is needed.
 
+Opening an `.ASM` file from the desktop switches immediately to ASM's text
+screen. ASM hides the graphics pointer while editing and restores the
+caller's display mode and pointer on exit. F1 followed by G resumes the
+text editor without replacing that saved caller display state.
+
 Editing keys are EDIT's: arrows, Home/End, PgUp/PgDn, Enter, Backspace,
 Delete and Tab; Ctrl+N new, Ctrl+L load, Ctrl+S save, Esc return. Errors
 show a line number and message, and move the cursor to that source line.

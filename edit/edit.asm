@@ -162,6 +162,11 @@ warm:
         sta MYBANK
         jsr setstub
 start:
+.ifdef ASM_EDITOR
+        lda #0                  ; desktop .ASM launcher leaves hires active
+        sta MODE
+        sta PTR                 ; hide its graphics pointer while editing
+.endif
         lda TXTCOL
         sta COLOR
         lda #2
@@ -818,6 +823,12 @@ enter:
         sta SAVWHI
         lda COLOR
         sta SAVCOL
+.ifdef ASM_EDITOR
+        lda MODE                ; capture only on a real caller -> ASM swap
+        sta ASMMODE             ; F1/G must not replace these saved values
+        lda PTR
+        sta ASMPTR
+.endif
         lda #0                  ; an interrupt handler in the caller's RAM is
         sta SAVIRQ              ; turned off while it is swapped out (one in
         lda IRQVEC+1            ; a bank keeps running)
@@ -858,6 +869,12 @@ leave:
         sta WARMHI
         lda SAVCOL
         sta COLOR
+.ifdef ASM_EDITOR
+        lda ASMMODE
+        sta MODE
+        lda ASMPTR
+        sta PTR
+.endif
         ldx SAVSP
         txs
         rts                     ; to the caller (CALL in BASIC, R, G...)
