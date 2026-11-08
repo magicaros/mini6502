@@ -27,6 +27,7 @@ from py65.devices.mpu6502 import MPU
 
 class Machine:
     def __init__(self):
+        SIM['disk'].__globals__['CUR'].clear()
         self.bus = SIM['Bus']()
         self.cpu = MPU(memory=self.bus)
         self.bus.__class__.__getitem__.__globals__['cpu'] = self.cpu
@@ -76,7 +77,9 @@ class Machine:
         return Path(_disk.name, filename)
 
     def editor(self, keys, entry=0xe000, pause=False):
-        (Path(_disk.name)/'ASMCORE').write_bytes((BUILD/'ASMCORE').read_bytes())
+        app = Path(_disk.name)/'ASM'
+        app.mkdir(exist_ok=True)
+        (app/'ASMCORE').write_bytes((BUILD/'ASMCORE').read_bytes())
         self.bus.queue = list(keys.replace('\n', '\r').encode('ascii'))
         self.cpu.sp = 0xff
         self.cpu.stPushWord(0x01ff)
@@ -226,6 +229,16 @@ class AssemblerTests(unittest.TestCase):
         before = bytes(m.bus.m[0x300:0xcc00])
         m.editor('')
         self.assertEqual(bytes(m.bus.m[0x300:0xcc00]), before)
+
+    def test_editor_core_loads_from_app_folder_while_editing_elsewhere(self):
+        m = Machine()
+        docs = Path(_disk.name)/'DOCS'
+        docs.mkdir(exist_ok=True)
+        SIM['disk'].__globals__['CUR'][:] = ['DOCS']
+        m.editor('.org $0300\nlda #42\nrts\n\x01FOLDERBIN\r\x1b')
+        self.assertEqual((docs/'FOLDERBIN').read_bytes(), bytes.fromhex('00 03 a9 2a 60'))
+        self.assertFalse((Path(_disk.name)/'ASMCORE').exists())
+        self.assertEqual(SIM['disk'].__globals__['CUR'], ['DOCS'])
 
     def test_branch_limits_and_symbol_capacity(self):
         self.assert_code('.org $0300\nbne *-126\nbne *+129', 'd0 80 d0 7f')

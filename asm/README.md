@@ -4,20 +4,22 @@ ASM is a banked full-screen source editor based on EDIT, with a native
 two-pass NMOS 6502 assembler. Assembly happens on the emulated 6502; Python
 and cc65 are only needed to rebuild or test the application on the host.
 
-The supplied disk has `ASM`, `ASMCORE`, and `HELLO.ASM`. Keep `ASMCORE` in
-the disk root: ASM loads `/ASMCORE` on demand into its private RAM.
+The disk's `ASM/` folder contains `ASM`, `ASMCORE`, and `HELLO.ASM`.
+ASM loads `/ASM/ASMCORE` on demand into its private RAM, independently of
+the current disk folder. This matches the desktop's `/ASM/ASM` launcher.
 
 ## Start and use
 
 From the monitor:
 
 ```text
+P /ASM
 L ASM E000 20
 D020: 20
 E000R
 ```
 
-Use Ctrl+L to open `HELLO.ASM`, then **Ctrl+A** to assemble. On success,
+From that folder, use Ctrl+L to open `HELLO.ASM`, then **Ctrl+A** to assemble. On success,
 enter a binary filename such as `HELLO`. Esc cancels saving without losing
 the source. Ctrl+S saves the **source**, independently of Ctrl+A's binary
 output. A binary cannot overwrite the currently named source file.
@@ -128,9 +130,10 @@ does not run the generated program automatically.
 
 ```sh
 sh asm/build.sh                 # outputs asm/build/ASM and ASMCORE
-cp asm/build/ASM disk/ASM
-cp asm/build/ASMCORE disk/ASMCORE
-cp asm/build/HELLO.ASM disk/HELLO.ASM
+mkdir -p disk/ASM
+cp asm/build/ASM disk/ASM/ASM
+cp asm/build/ASMCORE disk/ASM/ASMCORE
+cp asm/build/HELLO.ASM disk/ASM/HELLO.ASM
 python3 asm/test_asm.py          # requires py65 and Pillow, plus ca65/ld65
 ```
 

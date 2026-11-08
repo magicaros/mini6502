@@ -203,8 +203,8 @@ asm_save_fixed:
         lda ASMSTAT
         rts
 asm_stage: .byte $00,$44,$FF, 0,0,$FF, 0,0,0
-asm_core_name: .byte "/ASMCORE",0
-asm_missing: .byte " Cannot load /ASMCORE (missing or too large)",0
+asm_core_name: .byte "/ASM/ASMCORE",0
+asm_missing: .byte " Cannot load /ASM/ASMCORE (missing or too large)",0
 asm_work: .byte " Assembling...",0
 asm_saveas: .byte " Assembled. Save binary as: ",0
 asm_samename: .byte " Binary name must differ from source name",0
