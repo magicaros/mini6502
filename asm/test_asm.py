@@ -56,7 +56,7 @@ class Machine:
                 return
         raise AssertionError(f'timeout PC=${self.cpu.pc:04X}')
 
-    def assemble(self, source, gap=None):
+    def assemble(self, source, gap=None, max_steps=5000000):
         data = source.replace('\r\n', '\n').replace('\n', '\r').encode('ascii')
         if gap is None:
             gap = len(data)
@@ -65,7 +65,7 @@ class Machine:
         self.bus.m[end:0x4400] = data[gap:]
         self.word(0x10, 0x0400+gap)
         self.word(0x12, end)
-        self.call(0x8400)
+        self.call(0x8400, max_steps=max_steps)
         msg = bytes(self.bus.m[0xc500:0xc580]).split(b'\0')[0].decode()
         return self.bus.m[0xc400], msg, bytes(self.bus.m[0x4400:0x4400+self.word(0xc405)])
 
@@ -94,6 +94,140 @@ class Machine:
 
 
 class AssemblerTests(unittest.TestCase):
+    def include_file(self, name, text):
+        p = Path(_disk.name, name)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        body = text.encode('ascii') if isinstance(text, str) else text
+        p.write_bytes(b'\x00\x04' + body)
+        return p
+
+    def test_includes_nested_paths_and_forward_labels(self):
+        self.include_file('INC/outer.inc', '.include "./inner.inc"\r\n.byte <later\r\n')
+        self.include_file('INC/inner.inc', 'VALUE = 42\nlda #VALUE')
+        m = self.assert_code('.org $0300\n.include "INC/outer.inc"\nlater: rts\n', 'a9 2a 03 60')
+        self.assertEqual(bytes(m.bus.m[0xcf80:0xcf90]), bytes(16))
+
+    def test_include_paths_relative_to_named_main_source(self):
+        self.include_file('PROJECT/defs.inc', 'PORT = $D012\n')
+        self.include_file('SHARED/value.inc', '.byte 7\n')
+        m = Machine()
+        name = b'/PROJECT/main.asm'
+        m.bus.m[0x302] = len(name)
+        m.bus.m[0x310:0x310+len(name)] = name
+        status, message, body = m.assemble('.include "defs.inc"\n.org $300\n'
+                                           'sta PORT\n.include "../SHARED/value.inc"\nrts')
+        self.assertEqual(status, 0, message)
+        self.assertEqual(body, bytes.fromhex('8d 12 d0 07 60'))
+        self.assertEqual(SIM['disk'].__globals__['CUR'], [])
+
+    def test_include_diagnostics_and_recursion(self):
+        self.include_file('ERRORS/bad.inc', '; first\r\nlda missing\r\n')
+        m = Machine()
+        status, message, _ = m.assemble('.org $300\n.include "/ERRORS/bad.inc"\nrts')
+        self.assertEqual(status, 1)
+        self.assertIn('bad.inc:00002', message)
+        self.assertIn('Undefined symbol', message)
+        self.assertEqual(m.word(0xc401), 2)
+        self.assertEqual(bytes(m.bus.m[0xcf80:0xcf90]), bytes(16))
+        self.include_file('ERRORS/loop.inc', '.include "./LOOP.INC"\n')
+        self.assert_error('.org $300\n.include "ERRORS/loop.inc"', 'Recursive include', 2)
+        self.assert_error('.org $300\n.include "ABSENT.INC"', 'Include file not found', 2)
+        self.assert_error('.org $300\n.include ""', 'Invalid', 2)
+        self.assert_error('.org $300\n.include "../outside.inc"', 'Invalid', 2)
+        self.assert_error('.org $300\n.include "unterminated', 'Syntax', 2)
+        self.include_file('TRAIL.INC', '.byte 1')
+        self.assert_error('.org $300\n.include "TRAIL.INC" garbage', 'Syntax', 2)
+
+    def test_include_depth_and_file_limits(self):
+        for i in range(5):
+            self.include_file(f'DEPTH/F{i}.INC', f'.include "F{i+1}.INC"' if i<4 else '.byte 1')
+        self.assert_error('.org $300\n.include "DEPTH/F0.INC"', 'nested too deeply', 2)
+        self.include_file('BIG.INC', b';' + b' '*16384)
+        self.assert_error('.org $300\n.include "BIG.INC"', 'exceeds 16384', 2)
+        self.include_file('EMPTY.INC', '')
+        self.assert_code('.org $300\n.include "EMPTY.INC"\nnop', 'ea')
+        self.assert_error('.org $300\n'+'.include "EMPTY.INC"\n'*17+'nop', 'Too many includes', 18)
+
+    def test_include_repetition_four_levels_and_end(self):
+        self.include_file('REPEAT.INC', '.byte 7')
+        self.assert_code('.org $300\n.include "REPEAT.INC"\n.include "REPEAT.INC"\nrts', '07 07 60')
+        for i in range(4):
+            self.include_file(f'FOUR/F{i}.INC', f'.include "F{i+1}.INC"\n.byte {i}' if i<3 else '.byte 3')
+        self.assert_code('.org $300\n.include "FOUR/F0.INC"\nrts', '03 02 01 00 60')
+        self.include_file('STOP.INC', '.byte 42\n.end\ninvalid')
+        self.assert_code('.org $300\n.include "STOP.INC"\ninvalid', '2a')
+
+    def test_include_cache_address_crossing_and_capacity(self):
+        # An allocated image at $80-$8C makes cache addresses cross $90000.
+        body = b'.byte 42\n' + (b';' + b' '*249+b'\n')*20
+        self.include_file('CROSS.INC', body)
+        m = Machine()
+        m.bus.m[0xcf80:0xcf8d] = bytes([0x20])*13
+        status, message, output = m.assemble('.org $300\n'+'.include "CROSS.INC"\n'*3)
+        self.assertEqual(status, 0, message)
+        self.assertEqual(output, bytes([42])*3)
+        self.assertEqual(bytes(m.bus.m[0xcf80:0xcf8d]), bytes([0x20])*13)
+        self.assertEqual(bytes(m.bus.m[0xcf8d:0xcf9d]), bytes(16))
+        body = (b';'+b' '*252+b'\n')*64 + b';'+b' '*127
+        self.assertEqual(len(body), 16384)
+        self.include_file('CAPACITY.INC', body)
+        m = Machine()
+        status, message, _ = m.assemble('.org $300\n'+'.include "CAPACITY.INC"\n'*4,
+                                        max_steps=20000000)
+        self.assertEqual(status, 1)
+        self.assertIn('cache exceeds 65535', message)
+        self.assertEqual(bytes(m.bus.m[0xcf80:0xcf90]), bytes(16))
+
+    def test_editor_include_error_preserves_source_and_image(self):
+        self.include_file('UIBAD.INC', '; comment\nlda missing')
+        m = Machine()
+        source = '.org $0300\n.include "UIBAD.INC"\nrts\n'
+        m.editor(source+'\x01', pause=True)
+        row = ''.join(chr(c) for c in m.bus.g[24])
+        self.assertIn('Line 2', row)
+        self.assertIn('UIBAD.INC:00002', row)
+        self.assertIn('Undefined symbol', row)
+        self.assertEqual(m.word(0x16), 1)
+        self.assertEqual(bytes(m.bus.m[0xcf80:0xcf8d]), bytes([0x20])*13)
+        self.assertEqual(bytes(m.bus.m[0xcf8d:0xcf9d]), bytes(16))
+        self.assertEqual(bytes(m.bus.m[0x400:m.word(0x10)]) +
+                         bytes(m.bus.m[m.word(0x12):0x4400]), source.replace('\n','\r').encode())
+
+    def test_hardware_include_example(self):
+        self.include_file('HWTEST/hardware.inc', (BUILD/'HARDWARE.INC').read_bytes()[2:])
+        m = Machine()
+        SIM['disk'].__globals__['CUR'][:] = ['HWTEST']
+        status, message, native = m.assemble((ROOT/'asm/include-demo.asm').read_text())
+        self.assertEqual(status, 0, message)
+        self.assertEqual(native, bytes.fromhex('a9 41 8d 12 d0 a9 0d 8d 12 d0 60'))
+        m.bus.m[0x300:0x300+len(native)] = native
+        m.call(0x300)
+        self.assertEqual(bytes(m.bus.out), b'A\r')
+
+    def test_include_cache_is_snapshot_and_releases_memory(self):
+        p = self.include_file('SNAP.INC', '.byte 42\n')
+        env = SIM['Bus'].__setitem__.__globals__
+        original = env['disk']
+        loads = []
+        def disk(bus, command):
+            result = original(bus, command)
+            if command == 3:
+                loads.append(command)
+                p.write_bytes(b'\x00\x04.byte 99\n')
+            return result
+        env['disk'] = disk
+        try:
+            self.assert_code('.org $300\n.include "SNAP.INC"', '2a')
+        finally:
+            env['disk'] = original
+        self.assertEqual(loads, [3])
+        m = Machine()
+        m.bus.m[0xcf80:0xcfc0] = bytes([0x99])*64
+        status, message, _ = m.assemble('.org $300\n.include "SNAP.INC"')
+        self.assertEqual(status, 1)
+        self.assertIn('No room for include cache', message)
+        self.assertEqual(bytes(m.bus.m[0xcf80:0xcfc0]), bytes([0x99])*64)
+
     def assert_code(self, source, expected, gap=None):
         m = Machine()
         status, message, output = m.assemble(source, gap)

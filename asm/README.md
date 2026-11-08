@@ -4,7 +4,8 @@ ASM is a banked full-screen source editor based on EDIT, with a native
 two-pass NMOS 6502 assembler. Assembly happens on the emulated 6502; Python
 and cc65 are only needed to rebuild or test the application on the host.
 
-The disk's `ASM/` folder contains `ASM`, `ASMCORE`, and `HELLO.ASM`.
+The disk's `ASM/` folder contains `ASM`, `ASMCORE`, `HELLO.ASM`, and the
+include example `INCLUDES.ASM` with its generated `HARDWARE.INC` header.
 ASM loads `/ASM/ASMCORE` on demand into its private RAM, independently of
 the current disk folder. This matches the desktop's `/ASM/ASM` launcher.
 
@@ -59,7 +60,7 @@ Expressions accept `$hex`, `%binary`, decimal, `'c'`, symbols, `*` (current
 address), unary `+`/`-`, `<` (low byte), `>` (high byte), and left-to-right
 addition/subtraction. Arithmetic uses 16-bit values; literal overflow and
 out-of-range byte/branch operands are errors. There are no grouped
-expressions, multiplication, escapes, includes, macros or local scopes.
+expressions, multiplication, escapes, macros or local scopes.
 `<`/`>` apply to the following atom, before addition/subtraction.
 
 Numeric addresses use zero-page encodings where available. **Symbolic
@@ -88,7 +89,43 @@ message: .byte "Hello",13,0
 | `.text "text",...` | Same as `.byte`. |
 | `.word expression,...` | Little-endian 16-bit values. |
 | `.res count[,fill]` | Reserve bytes, default fill zero. |
+| `.include "path"` | Assemble another disk source file at this point. |
 | `.end` | Stop processing source. |
+
+### Include files
+
+```asm
+.include "hardware.inc"
+.org $0300
+        lda #'A'
+        sta DSP
+        rts
+```
+
+Open `INCLUDES.ASM` from `/ASM` to try this. `HARDWARE.INC` is generated
+from `hw/mini6502.inc` and supplies 206 hardware/system equates, leaving
+50 of the assembler's 256 symbol slots for your program. Include it once.
+
+Paths are relative to the **containing source file**, including nested
+includes. Absolute paths such as `/ASM/HARDWARE.INC`, `.` and `..` path
+components work too. An unnamed buffer uses the current disk folder.
+Assembly leaves the disk's current folder unchanged. Included files use
+the same two-byte load-address-prefixed text format as EDIT/ASM source;
+their saved load address is ignored. CR, LF and CRLF are accepted, and
+the final line need not end with a newline.
+
+Up to four include levels and 16 include occurrences are allowed. Each
+file may contain up to 16 KiB of source, with at most 65,535 included bytes
+in total. Included text is cached in 16 temporary document banks during
+pass one and reused in pass two, then those banks are freed on success or
+error. These banks are additional to ASM's 13-bank persistent RAM image.
+Repeated, nonrecursive includes are allowed and count separately toward
+these limits; recursive includes are rejected. Symbols share one global
+namespace. `.end` in an include ends the entire assembly.
+
+Errors in included source identify its basename and local line in the
+status message. The editor cursor points to the corresponding `.include`
+line in the main buffer, so the source buffer remains intact.
 
 Set an origin before emitting bytes. Origins cannot move backwards.
 Constants, origins and reserve counts must resolve when first seen;
@@ -105,9 +142,11 @@ bank with the monitor's `L name E000 bank` command.
 | --- | --- |
 | `$0400-$43FF` | 16 KiB source gap buffer |
 | `$4400-$83FF` | Up to 16 KiB assembled output |
-| `$8400-$AFFF` | On-demand core and reserved space |
+| `$8400-$9FFF` | On-demand core and reserved space |
+| `$A000-$ACFF` | Include paths and cache descriptors |
 | `$B000-$C3FF` | Up to 256 symbols (20 bytes each) |
 | `$C400-$C7FF` | Results, messages, line and token buffers |
+| `$C800-$CABF` | Include stack, root path and path scratch |
 | `$CBF0` | EDIT-compatible warm-start stub |
 | Application bank `$E000-$EFFF` | Editor, disk-save helper, entry state |
 | 13 allocated banks in `$80-$BF` | Persistent private RAM image |
@@ -134,10 +173,13 @@ mkdir -p disk/ASM
 cp asm/build/ASM disk/ASM/ASM
 cp asm/build/ASMCORE disk/ASM/ASMCORE
 cp asm/build/HELLO.ASM disk/ASM/HELLO.ASM
+cp asm/build/HARDWARE.INC disk/ASM/HARDWARE.INC
+cp asm/build/INCLUDES.ASM disk/ASM/INCLUDES.ASM
 python3 asm/test_asm.py          # requires py65 and Pillow, plus ca65/ld65
 ```
 
 The tests execute the actual native binaries using the existing mini6502
 bus/simulator. They cover all official opcodes, forward references, gap
 positions, error paths, disk output, source/caller preservation, and editor
-entry/resume. The normal EDIT build remains byte-for-byte unchanged.
+entry/resume, nested includes, path resolution, cached passes and include
+failure cleanup. The normal EDIT build remains byte-for-byte unchanged.

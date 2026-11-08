@@ -42,6 +42,28 @@ FILL = $C40A
 COUNT = $C40B
 SYMKIND = $C40D
 LABEL = $C720
+IADDR = $60                    ; current included stream's extended address
+ILEFT = $63                    ; bytes remaining in that stream
+IACTIVE = $65                  ; 0 root buffer, 1..16 cached file descriptor
+IDEPTH = $66                   ; number of saved parent streams (0..4)
+ICACHE = $67                   ; first of 16 temporary banks, 0 if unallocated
+IUSED = $68                    ; total cached bytes (max 65535)
+ISEQ = $6A                     ; next descriptor in encounter order
+IFILES = $6B                   ; descriptor count from pass one
+IPREVCR = $6C
+IPTR = $6D                    ; include helpers' private pointers
+IPTR2 = $6F
+IREC = $71
+ICOMP = $73
+IINDEX = $74
+INAVLINE = $C410               ; root include site, used by editor navigation
+IROOT = $C900                  ; absolute main-source path, max 191 characters
+IRAW = $CA00                   ; path construction / diagnostic scratch
+IPATH = $C740                  ; normalized include path
+IFRAMES = $C800                ; four 16-byte parent frames
+ITABLE = $A000                 ; 16 descriptors, 208 bytes each ($A000-$ACFF)
+; descriptor: path[192], extended address[3], length[2], reserved[11]
+
         .org $8400
         jmp assemble
         jmp save_binary
@@ -55,11 +77,16 @@ assemble:
         sta NSYM
         sta NSYM+1
         sta PASS
+        jsr include_init
 @pass: lda #0
         sta PC
         sta PC+1
         sta ORIGINSET
         sta EOFFLAG
+        sta IDEPTH
+        sta IACTIVE
+        sta ISEQ
+        sta IPREVCR
         sta SRC
         sta LINE+1
         lda #4
@@ -85,7 +112,8 @@ assemble:
         bne @done
         inc PASS
         jmp @pass
-@done: sec
+@done: jsr include_cleanup
+        sec
         lda OUT
         sbc #<$4400
         sta LENGTH
@@ -99,12 +127,57 @@ assemble:
         ldx #>msg_ok
         jmp message
 
-; read one CR/LF-terminated source line, traversing the editor's gap.
+; Read CR, LF or CRLF lines from the root gap buffer or cached include.
 read_line:
         lda EOFFLAG
         bne @eof
         ldx #0
-@next: lda SRC
+@next: jsr source_char
+        bcs @last
+        cmp #10
+        bne @notlf
+        lda IPREVCR
+        bne @skip_lf
+        beq @newline
+@notlf: cmp #13
+        beq @cr
+        pha
+        lda #0
+        sta IPREVCR
+        pla
+        cpx #254
+        jcs err_longline
+        sta LINEBUF,x
+        inx
+        jmp @next
+@skip_lf:
+        lda #0
+        sta IPREVCR
+        jmp @next
+@cr:   lda #1
+        sta IPREVCR
+        bne @done
+@newline:
+        lda #0
+        sta IPREVCR
+        beq @done
+@last: cpx #0
+        bne @done
+        lda IACTIVE
+        beq @eof
+        jsr include_pop
+        jmp read_line
+@done: lda #0
+        sta LINEBUF,x
+        clc
+        rts
+@eof:  sec
+        rts
+
+source_char:
+        lda IACTIVE
+        bne include_char
+        lda SRC
         cmp $10
         bne @read
         lda SRC+1
@@ -116,26 +189,40 @@ read_line:
         sta SRC+1
 @read: lda SRC+1
         cmp #$44
-        bcs @last
+        bcs @eof
         ldy #0
         lda (SRC),y
         inc SRC
         bne :+
         inc SRC+1
-:      cmp #13
-        beq @done
-        cmp #10
-        beq @done
-        cpx #254
-        jcs err_longline
-        sta LINEBUF,x
-        inx
-        jmp @next
-@last: inc EOFFLAG
-        cpx #0
+:       clc
+        rts
+@eof:  sec
+        rts
+include_char:
+        lda ILEFT
+        ora ILEFT+1
         beq @eof
-@done: lda #0
-        sta LINEBUF,x
+        lda IADDR
+        sta PADR
+        lda IADDR+1
+        sta PADR+1
+        lda IADDR+2
+        sta PADR+2
+        lda #0
+        sta PSTEP
+        lda PDATA
+        pha
+        inc IADDR
+        bne :+
+        inc IADDR+1
+        bne :+
+        inc IADDR+2
+:       lda ILEFT
+        bne :+
+        dec ILEFT+1
+:       dec ILEFT
+        pla
         clc
         rts
 @eof:  sec
@@ -567,7 +654,7 @@ operation:
         bne @cmp
 @nextdir:
         inx
-        cpx #6
+        cpx #7
         bcc @dir
         jmp instruction
 @directive:
@@ -1042,8 +1129,16 @@ fail:   pha
         sta ERRLINE
         lda LINE+1
         sta ERRLINE+1
-        pla
+        lda IACTIVE
+        beq :+
+        lda INAVLINE
+        sta ERRLINE
+        lda INAVLINE+1
+        sta ERRLINE+1
+:       pla
         jsr message
+        jsr include_diagnostic
+        jsr include_cleanup
         ldx SAVEDSP
         txs
         rts
@@ -1058,15 +1153,16 @@ message:
         bne @copy
 @done: rts
 
-dirs_lo: .lobytes dir_org,dir_byte,dir_word,dir_text,dir_res,dir_end
-dirs_hi: .hibytes dir_org,dir_byte,dir_word,dir_text,dir_res,dir_end
-dirs_jump: .word org-1,data_bytes-1,data_words-1,data_bytes-1,reserve-1,end_source-1
+dirs_lo: .lobytes dir_org,dir_byte,dir_word,dir_text,dir_res,dir_end,dir_include
+dirs_hi: .hibytes dir_org,dir_byte,dir_word,dir_text,dir_res,dir_end,dir_include
+dirs_jump: .word org-1,data_bytes-1,data_words-1,data_bytes-1,reserve-1,end_source-1,include_source-1
 dir_org: .byte ".ORG",0
 dir_byte: .byte ".BYTE",0
 dir_word: .byte ".WORD",0
 dir_text: .byte ".TEXT",0
 dir_res: .byte ".RES",0
 dir_end: .byte ".END",0
+dir_include: .byte ".INCLUDE",0
 msg_ok: .byte " Assembled OK (binary not saved)",0
 msg_saved: .byte " Assembled and saved binary",0
 msg_disk: .byte " Disk error saving binary",0
@@ -1087,5 +1183,6 @@ msg_noorg: .byte " Set .ORG before emitting code",0
 msg_output: .byte " Output exceeds 16384 bytes",0
 msg_longline: .byte " Source line exceeds 254 characters",0
 msg_empty: .byte " No bytes assembled",0
+        .include "include.inc"
         .include "opcodes.inc"
-        .assert * <= $B000, error, "assembler overlaps symbol table"
+        .assert * <= $A000, error, "assembler overlaps include descriptors"

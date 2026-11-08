@@ -74,7 +74,7 @@ See `basicx/README.txt` for the complete extension reference.
 ### 📂 asm/ — Native 6502 Assembler
 - Banked full-screen source editor based on EDIT
 - Ctrl+A assembles source inside mini6502 and saves loadable binaries
-- All official NMOS 6502 opcodes, labels, expressions, and data directives
+- All official NMOS 6502 opcodes, labels, expressions, data directives, and nested includes
 - See [asm/README.md](asm/README.md) for startup, syntax, and limits
 
 ### 📂 toolkit/ — Desktop Toolkit
