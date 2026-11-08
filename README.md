@@ -145,6 +145,7 @@ Toolkit modules are split across memory banks for organization:
 - **Klaus Dormann** — for bug-fix patches to EhBASIC 2.22p5
 - **Mike Chambers** — for Fake6502 (public domain core)
 - **Claude AI** — as a collaborative coding assistant throughout this project
+- **OpenAI Codex** — for assistance developing and testing the native ASM editor and assembler, include support, diagnostics, and desktop integration
 
 ---
 
